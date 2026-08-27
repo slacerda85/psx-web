@@ -27,6 +27,7 @@ serão resolvidos juntos, quando houver um scheduler que intercale DMA e CPU.
 | `cpu/access-time` | Waitstates por região do mapa de memória |
 | `cdrom/timing` | Latência de resposta dos comandos do drive |
 | `timers` / `timer-dump` | Os contadores já batem exatamente; o que falha é o custo do DMA aparecer como zero |
+| `dma/chain-looping` | Cadeia auto-referente: o comportamento observável (não conclui, sem IRQ) já bate; sobra o custo em ciclos |
 
 ## Subsistemas ausentes
 
@@ -50,9 +51,9 @@ levou às correções de GTE, SIO e DMA: rodar, ler a diferença, isolar.
 
 | Teste | Sintoma |
 | --- | --- |
-| `cpu/code-in-io` | Execução de código a partir da scratchpad e de portas de I/O |
-| `cpu/io-access-bitwidth` | Larguras de acesso (8/16/32 bits) por registrador; divergimos em `DMA0_ADDR`, `DMAC_CTRL` e `JOY_MODE` |
-| `cdrom/disc-swap` | Comportamento ao abrir/fechar a bandeja |
+| `cpu/code-in-io` | A scratchpad já dá bus error; buscar instrução da região do MDEC prende o emulador num laço |
+| `cpu/io-access-bitwidth` | Restam o campo de resolução em `GPUSTAT` e a região de Expansion 3 |
+| `cdrom/disc-swap` | Espera um humano abrir a tampa — não automatizável sem um gatilho sintético no harness |
 | `cdrom/getloc` | Bits de status durante seek e leitura, e as respostas de `GetlocL`/`GetlocP` |
 
 ## A trava do Xenogears
@@ -76,11 +77,6 @@ espera acompanha a latência que configuramos mais ~331 ciclos, seja qual for o
 valor — como se o jogo reagisse ao nosso timing em vez de a um prazo fixo.
 Essa contradição é o fio a puxar na próxima sessão.
 
-## Trava
-
-| Teste | Sintoma |
-| --- | --- |
-| `dma/chain-looping` | Lista encadeada auto-referente. O teste estoura o tempo limite: provavelmente seguimos o laço para sempre onde o hardware sai. É bug nosso, não limitação. |
 
 ## Já corrigidos por esta comparação
 

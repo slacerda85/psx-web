@@ -16,6 +16,12 @@ use crate::sio::Sio;
 use crate::spu::Spu;
 use crate::timers::Timers;
 
+/// Teto de nós numa lista encadeada de DMA.
+///
+/// Uma cadeia legítima não visita mais nós do que a RAM tem palavras; passar
+/// disso significa que ela está revisitando endereços.
+const MAX_LINKED_LIST_NODES: u32 = (2 * 1024 * 1024) / 4;
+
 /// O barramento e tudo que está pendurado nele.
 pub struct Bus {
     pub ram: Ram,
@@ -408,12 +414,24 @@ impl Bus {
     /// O hardware intercala DMA e CPU; aqui a transferência é atômica, o que é
     /// suficiente enquanto o scheduler não for ciclo-a-ciclo.
     pub fn run_dma(&mut self, port: Port) {
-        match port {
-            Port::Otc => self.run_dma_otc(),
+        let finished = match port {
+            Port::Otc => {
+                self.run_dma_otc();
+                true
+            }
             _ => match self.dma.channel(port).sync() {
                 Sync::LinkedList => self.run_dma_linked_list(port),
-                _ => self.run_dma_block(port),
+                _ => {
+                    self.run_dma_block(port);
+                    true
+                }
             },
+        };
+
+        // Sem conclusão não há flag de fim nem interrupção: o canal continua
+        // marcado como ativo, que é o que o software observa no console.
+        if !finished {
+            return;
         }
 
         self.dma.channel_mut(port).finish();
@@ -515,15 +533,27 @@ impl Bus {
         }
     }
 
-    fn run_dma_linked_list(&mut self, port: Port) {
+    /// Percorre uma lista encadeada. Devolve `false` se ela não terminou.
+    ///
+    /// Uma cadeia que aponta para si mesma nunca acaba. No console isso não
+    /// trava nada: o DMA segue rodando em segundo plano, a CPU continua e a
+    /// transferência simplesmente não conclui — sem flag de fim e sem IRQ.
+    /// Como aqui a transferência é atômica, o equivalente é desistir depois de
+    /// visitar mais nós do que a RAM comporta e deixar o canal em andamento.
+    fn run_dma_linked_list(&mut self, port: Port) -> bool {
         // Só o canal da GPU usa listas encadeadas.
         if port != Port::Gpu {
-            return;
+            return true;
         }
 
         let mut address = self.dma.channel(port).base & 0x001F_FFFC;
+        let mut visited = 0u32;
 
         loop {
+            visited += 1;
+            if visited > MAX_LINKED_LIST_NODES {
+                return false;
+            }
             let header = self.ram.read32(address);
             let mut count = header >> 24;
 
@@ -536,7 +566,7 @@ impl Bus {
 
             // Bit 23 do header marca o fim da lista.
             if header & 0x0080_0000 != 0 {
-                break;
+                return true;
             }
             address = header & 0x001F_FFFC;
         }
