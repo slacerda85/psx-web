@@ -55,6 +55,27 @@ levou às correções de GTE, SIO e DMA: rodar, ler a diferença, isolar.
 | `cdrom/disc-swap` | Comportamento ao abrir/fechar a bandeja |
 | `cdrom/getloc` | Bits de status durante seek e leitura, e as respostas de `GetlocL`/`GetlocP` |
 
+## A trava do Xenogears
+
+O jogo carrega, executa 299 setores de código próprio e entra num laço
+ infinito, com todos os contadores de diagnóstico em
+zero. Não é funcionalidade faltando.
+
+O que já foi medido e **descartado**:
+
+- Não é o MDEC: implementá-lo não mudou nada.
+- Não é o GTE, a GPU nem o SIO0, todos verificados contra o console.
+- Não é o mapeamento de LBA: o header BCD do setor confere com o MSF pedido.
+- Não é o fim do disco nem o gate de acknowledge do drive: instrumentados,
+  nenhum dos dois é atingido durante a trava.
+
+O que ficou sem explicação: o contador de  **não expira**
+durante a trava, embora o drive esteja em  e o jogo espere mais
+ciclos do que o período de um setor. Medindo do  até o , a
+espera acompanha a latência que configuramos mais ~331 ciclos, seja qual for o
+valor — como se o jogo reagisse ao nosso timing em vez de a um prazo fixo.
+Essa contradição é o fio a puxar na próxima sessão.
+
 ## Trava
 
 | Teste | Sintoma |

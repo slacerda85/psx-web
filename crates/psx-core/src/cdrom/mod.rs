@@ -489,10 +489,8 @@ impl CdRom {
                 self.drive = Drive::Reading;
                 self.status |= status::READING;
                 self.status &= !status::SEEKING;
-                // O primeiro setor sai na mesma cadência dos seguintes, e não
-                // depois de um atraso de seek: quando o `Setloc` cai perto de
-                // onde a cabeça já está — o caso comum ao ler um arquivo em
-                // pedaços — o drive real não reposiciona nada.
+                // O primeiro setor sai na mesma cadência dos seguintes: o
+                // drive já está girando quando o `Setloc` cai perto da cabeça.
                 self.next_sector_in = self.cycles_per_sector();
                 self.acknowledge();
             }

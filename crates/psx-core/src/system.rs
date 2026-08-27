@@ -136,21 +136,24 @@ impl System {
             spent += cycles as u64;
             instructions += 1;
 
-            // SIO0 e timers andam junto com a CPU, e não em bloco no fim da
-            // scanline. O `/ACK` do controller chega ~338 ciclos depois do
-            // byte e o BIOS desiste antes disso; e um jogo que lê o contador no
-            // meio do frame veria saltos de 2145 em 2145 no lugar do valor
-            // corrente. Custa ~8% de desempenho e é o que faz o contador bater
-            // exatamente com o console.
+            // SIO0, timers e CD-ROM andam junto com a CPU, e não em bloco no
+            // fim da scanline.
+            //
+            // O `/ACK` do controller chega ~338 ciclos depois do byte e o BIOS
+            // desiste antes disso. Um jogo que lê o contador no meio do frame
+            // veria saltos de 2145 em 2145 no lugar do valor corrente. E o
+            // setor do CD sai a cada 225792 ciclos em 2x, enquanto o jogo
+            // espera 227476 antes de desistir: 1684 ciclos de margem, que a
+            // granularidade de scanline consumia inteira.
             self.bus.sio.step(cycles, &mut self.bus.irq);
             self.bus.timers.step(cycles, &mut self.bus.irq);
+            self.bus.cdrom.step(cycles, &mut self.bus.irq);
         }
 
         // Os periféricos avançam em bloco no fim da scanline. Isso é grosso o
         // bastante para o boot e para jogos que não dependem de timing de
         // sub-scanline; refiná-lo é trabalho do scheduler ciclo-a-ciclo.
         let elapsed = spent as u32;
-        self.bus.cdrom.step(elapsed, &mut self.bus.irq);
         self.bus.spu.step(elapsed);
 
         (spent, instructions)
