@@ -73,6 +73,10 @@ impl Default for ButtonState {
     }
 }
 
+/// Ciclos entre o byte e o `/ACK` do dispositivo (PSX-SPX — "Controller and
+/// Memory Card Signals").
+const ACK_DELAY: i32 = 338;
+
 /// Alvo da transferência em andamento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -95,13 +99,22 @@ pub struct Sio {
     /// Byte pronto para leitura em `JOY_DATA`.
     receive: u8,
     receive_full: bool,
-    /// O dispositivo puxou a linha de `ACK` (gera IRQ7).
+    /// O dispositivo puxou a linha de `/ACK` (gera IRQ7).
     ack: bool,
     irq_raised: bool,
+    /// Ciclos restantes até o dispositivo puxar `/ACK`. Zero = nada pendente.
+    pending_ack: i32,
 
     target: Target,
     /// Índice do byte dentro da sequência de resposta do dispositivo.
     sequence: usize,
+
+    /// Bytes de botão já entregues ao console, para diagnóstico.
+    button_bytes_sent: u64,
+    /// Transações iniciadas com o byte 0x01 (controller), para diagnóstico.
+    controller_selects: u64,
+    /// Bytes escritos em JOY_DATA, para diagnóstico.
+    writes: u64,
 }
 
 impl Sio {
@@ -116,9 +129,25 @@ impl Sio {
             receive_full: false,
             ack: false,
             irq_raised: false,
+            pending_ack: 0,
             target: Target::None,
             sequence: 0,
+            button_bytes_sent: 0,
+            controller_selects: 0,
+            writes: 0,
         }
+    }
+
+    /// Retrato do tráfego no SIO0, para diagnóstico.
+    pub fn debug_state(&self) -> String {
+        format!(
+            "escritas={} selects={} bytes_de_botao={} control={:#06X} conectado={:?}",
+            self.writes,
+            self.controller_selects,
+            self.button_bytes_sent,
+            self.control,
+            self.connected
+        )
     }
 
     /// Atualiza o estado dos botões de um slot (0 ou 1).
@@ -179,9 +208,9 @@ impl Sio {
     }
 
     /// Escrita em `0x1F80_1040..0x1F80_104F`.
-    pub fn write(&mut self, offset: u32, value: u32, irq: &mut IrqController) {
+    pub fn write(&mut self, offset: u32, value: u32) {
         match offset & 0x0F {
-            0x00 => self.transfer(value as u8, irq),
+            0x00 => self.transfer(value as u8),
             0x08 => self.mode = value as u16,
             0x0A => self.write_control(value as u16),
             0x0E => self.baud = value as u16,
@@ -193,9 +222,14 @@ impl Sio {
         self.control = value;
 
         // Bit 4: acknowledge da IRQ.
+        //
+        // Reconhece a **interrupção**, e só ela. A linha `/ACK` é uma entrada
+        // vinda do dispositivo: o console não a controla. Derrubá-la aqui
+        // apagava a única prova de que havia um controller no slot — o BIOS
+        // escreve este bit entre enviar o byte e ler o status, então lia o
+        // status já sem o `/ACK` e concluía que o slot estava vazio.
         if value & (1 << 4) != 0 {
             self.irq_raised = false;
-            self.ack = false;
         }
         // Bit 6: reset completo.
         if value & (1 << 6) != 0 {
@@ -217,7 +251,14 @@ impl Sio {
 
     /// Um byte enviado pela CPU em `JOY_DATA`; devolve o byte simultâneo do
     /// dispositivo e, se houver, o `ACK` que gera IRQ7.
-    fn transfer(&mut self, sent: u8, irq: &mut IrqController) {
+    fn transfer(&mut self, sent: u8) {
+        self.writes += 1;
+        self.transfer_inner(sent);
+    }
+
+    fn transfer_inner(&mut self, sent: u8) {
+        // Um byte novo derruba o /ACK do byte anterior.
+        self.ack = false;
         if !self.is_selected() {
             self.receive = 0xFF;
             self.receive_full = true;
@@ -231,7 +272,10 @@ impl Sio {
         // 0x01 = controller, 0x81 = memory card.
         if self.target == Target::None {
             self.target = match sent {
-                0x01 if self.connected[slot] => Target::Controller,
+                0x01 if self.connected[slot] => {
+                    self.controller_selects += 1;
+                    Target::Controller
+                }
                 0x81 => Target::MemoryCard,
                 _ => Target::None,
             };
@@ -248,12 +292,17 @@ impl Sio {
 
             self.receive = 0xFF;
             self.receive_full = true;
-            self.raise_ack(irq);
+            self.schedule_ack();
             return;
         }
 
         let response = match self.target {
-            Target::Controller => self.controller_byte(slot, self.sequence),
+            Target::Controller => {
+                if self.sequence == 2 || self.sequence == 3 {
+                    self.button_bytes_sent += 1;
+                }
+                self.controller_byte(slot, self.sequence)
+            }
             // TODO(@sio): implementar o protocolo do memory card. Responder
             // 0xFF sem ACK faz o BIOS concluir "sem cartão".
             Target::MemoryCard | Target::None => None,
@@ -266,7 +315,7 @@ impl Sio {
                 self.receive = byte;
                 self.receive_full = true;
                 if more {
-                    self.raise_ack(irq);
+                    self.schedule_ack();
                 } else {
                     self.ack = false;
                     self.target = Target::None;
@@ -300,7 +349,27 @@ impl Sio {
         }
     }
 
-    fn raise_ack(&mut self, irq: &mut IrqController) {
+    /// Agenda o `/ACK` do dispositivo.
+    ///
+    /// O `/ACK` **não** é simultâneo ao byte: o controller responde algumas
+    /// centenas de ciclos depois. Disparar na hora quebra o BIOS, que escreve
+    /// o acknowledge de `JOY_CTRL` logo após enviar o byte e só então vai
+    /// esperar a IRQ — com o ACK imediato, ele apagava a própria interrupção
+    /// que estava prestes a aguardar, dava timeout e concluía "slot vazio".
+    fn schedule_ack(&mut self) {
+        self.pending_ack = ACK_DELAY;
+    }
+
+    /// Avança o `/ACK` pendente. Chamado com os ciclos gastos pela CPU.
+    pub fn step(&mut self, cycles: u32, irq: &mut IrqController) {
+        if self.pending_ack <= 0 {
+            return;
+        }
+        self.pending_ack -= cycles as i32;
+        if self.pending_ack > 0 {
+            return;
+        }
+        self.pending_ack = 0;
         self.ack = true;
         // Bit 12 de JOY_CTRL habilita a IRQ no ACK.
         if self.control & (1 << 12) != 0 {
@@ -329,16 +398,21 @@ mod tests {
         (Sio::new(), irq)
     }
 
-    /// Envia um byte e devolve o que o dispositivo respondeu.
+    /// Envia um byte, deixa o `/ACK` chegar e devolve a resposta.
+    ///
+    /// O `/ACK` não é simultâneo ao byte, então um teste que não avança o
+    /// tempo nunca o veria — que era exatamente o que mascarava o bug.
     fn exchange(sio: &mut Sio, irq: &mut IrqController, byte: u8) -> u8 {
-        sio.write(0x00, byte as u32, irq);
-        sio.read(0x00) as u8
+        sio.write(0x00, byte as u32);
+        let response = sio.read(0x00) as u8;
+        sio.step(ACK_DELAY as u32, irq);
+        response
     }
 
     #[test]
     fn digital_controller_reports_its_id_and_buttons() {
         let (mut sio, mut irq) = sio();
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
 
         assert_eq!(exchange(&mut sio, &mut irq, 0x01), 0xFF, "byte de seleção");
         assert_eq!(exchange(&mut sio, &mut irq, 0x42), 0x41, "ID baixo");
@@ -355,7 +429,7 @@ mod tests {
         state.set(Button::Start, true);
         sio.set_buttons(0, state);
 
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
         exchange(&mut sio, &mut irq, 0x01);
         exchange(&mut sio, &mut irq, 0x42);
         exchange(&mut sio, &mut irq, 0x00);
@@ -371,7 +445,7 @@ mod tests {
     #[test]
     fn ack_raises_irq7_while_more_bytes_remain() {
         let (mut sio, mut irq) = sio();
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
 
         exchange(&mut sio, &mut irq, 0x01);
         assert_ne!(
@@ -384,7 +458,7 @@ mod tests {
     #[test]
     fn last_byte_does_not_acknowledge() {
         let (mut sio, mut irq) = sio();
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
 
         for byte in [0x01, 0x42, 0x00, 0x00] {
             exchange(&mut sio, &mut irq, byte);
@@ -398,7 +472,7 @@ mod tests {
     fn empty_slot_answers_all_ones_without_ack() {
         let (mut sio, mut irq) = sio();
         sio.set_connected(0, false);
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
 
         assert_eq!(exchange(&mut sio, &mut irq, 0x01), 0xFF);
         assert_eq!(sio.status() & (1 << 7), 0, "sem ACK");
@@ -411,7 +485,7 @@ mod tests {
     #[test]
     fn memory_card_reports_absent() {
         let (mut sio, mut irq) = sio();
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
         exchange(&mut sio, &mut irq, 0x81);
         assert_eq!(exchange(&mut sio, &mut irq, 0x52), 0xFF, "sem cartão");
     }
@@ -427,11 +501,11 @@ mod tests {
     #[test]
     fn acknowledge_bit_clears_the_pending_irq() {
         let (mut sio, mut irq) = sio();
-        sio.write(0x0A, SELECT_SLOT0, &mut irq);
+        sio.write(0x0A, SELECT_SLOT0);
         exchange(&mut sio, &mut irq, 0x01);
         assert_ne!(sio.status() & (1 << 9), 0, "IRQ marcada em JOY_STAT");
 
-        sio.write(0x0A, SELECT_SLOT0 | (1 << 4), &mut irq);
+        sio.write(0x0A, SELECT_SLOT0 | (1 << 4));
         assert_eq!(sio.status() & (1 << 9), 0);
     }
 
@@ -444,7 +518,7 @@ mod tests {
         sio.set_buttons(1, state);
 
         // Bit 13 de JOY_CTRL seleciona o slot 2.
-        sio.write(0x0A, SELECT_SLOT0 | (1 << 13), &mut irq);
+        sio.write(0x0A, SELECT_SLOT0 | (1 << 13));
         exchange(&mut sio, &mut irq, 0x01);
         exchange(&mut sio, &mut irq, 0x42);
         exchange(&mut sio, &mut irq, 0x00);
@@ -458,5 +532,86 @@ mod tests {
         let state = ButtonState::from_pressed_mask(1 << Button::Cross as u16);
         assert!(state.is_pressed(Button::Cross));
         assert!(!state.is_pressed(Button::Circle));
+    }
+
+    #[test]
+    fn the_ack_arrives_after_the_byte_and_not_with_it() {
+        let (mut sio, mut irq) = sio();
+        sio.write(0x0A, SELECT_SLOT0);
+
+        sio.write(0x00, 0x01);
+        assert_eq!(
+            sio.status() & (1 << 7),
+            0,
+            "o /ACK não é simultâneo ao byte"
+        );
+        assert_eq!(
+            irq.stat() & (1 << Interrupt::ControllerAndMemoryCard as u16),
+            0,
+            "e a IRQ também não"
+        );
+
+        // Antes do prazo, ainda nada.
+        sio.step(ACK_DELAY as u32 / 2, &mut irq);
+        assert_eq!(sio.status() & (1 << 7), 0);
+
+        sio.step(ACK_DELAY as u32, &mut irq);
+        assert_ne!(sio.status() & (1 << 7), 0, "o /ACK chega depois do atraso");
+        assert_ne!(
+            irq.stat() & (1 << Interrupt::ControllerAndMemoryCard as u16),
+            0,
+            "e leva a IRQ7 junto"
+        );
+    }
+
+    #[test]
+    fn acknowledging_the_irq_does_not_drop_the_ack_line() {
+        let (mut sio, mut irq) = sio();
+        sio.write(0x0A, SELECT_SLOT0);
+        sio.write(0x00, 0x01);
+        sio.step(ACK_DELAY as u32, &mut irq);
+        assert_ne!(sio.status() & (1 << 7), 0);
+
+        // Bit 4 reconhece a interrupção. O BIOS escreve isto entre enviar o
+        // byte e ler o status; se derrubasse o /ACK junto, ele leria o status
+        // sem a prova de que há um controller e desistiria do slot.
+        sio.write(0x0A, SELECT_SLOT0 | (1 << 4));
+
+        assert_eq!(sio.status() & (1 << 9), 0, "a IRQ foi reconhecida");
+        assert_ne!(sio.status() & (1 << 7), 0, "o /ACK continua de pé");
+    }
+
+    #[test]
+    fn a_new_byte_drops_the_previous_ack() {
+        let (mut sio, mut irq) = sio();
+        sio.write(0x0A, SELECT_SLOT0);
+        sio.write(0x00, 0x01);
+        sio.step(ACK_DELAY as u32, &mut irq);
+        assert_ne!(sio.status() & (1 << 7), 0);
+
+        sio.write(0x00, 0x42);
+        assert_eq!(sio.status() & (1 << 7), 0, "o /ACK anterior caiu");
+    }
+
+    #[test]
+    fn a_full_pad_read_delivers_both_button_bytes() {
+        let (mut sio, mut irq) = sio();
+        let mut state = ButtonState::RELEASED;
+        state.set(Button::Down, true);
+        sio.set_buttons(0, state);
+        sio.write(0x0A, SELECT_SLOT0);
+
+        // A sequência completa que o BIOS emite: 01 42 00 00 00.
+        let mut responses = Vec::new();
+        for byte in [0x01u8, 0x42, 0x00, 0x00, 0x00] {
+            responses.push(exchange(&mut sio, &mut irq, byte));
+        }
+
+        assert_eq!(responses[0], 0xFF, "seleção");
+        assert_eq!(responses[1], 0x41, "ID baixo");
+        assert_eq!(responses[2], 0x5A, "ID alto");
+        // Down é o bit 6 do byte baixo, ativo-baixo.
+        assert_eq!(responses[3] & (1 << 6), 0, "Down pressionado");
+        assert_eq!(responses[4], 0xFF, "nada no byte alto");
     }
 }

@@ -320,7 +320,7 @@ impl Bus {
     fn store_io32(&mut self, offset: u32, address: u32, value: u32) {
         match offset {
             0x000..=0x023 => self.memory_control[(offset / 4) as usize] = value,
-            0x040..=0x04F => self.sio.write(offset, value, &mut self.irq),
+            0x040..=0x04F => self.sio.write(offset, value),
             0x050..=0x05F => {}
             0x060 => self.ram_size = value,
             0x070 => self.irq.write_stat(value as u16),
@@ -346,7 +346,7 @@ impl Bus {
 
     fn store_io16(&mut self, offset: u32, address: u32, value: u16) {
         match offset {
-            0x040..=0x04F => self.sio.write(offset, value as u32, &mut self.irq),
+            0x040..=0x04F => self.sio.write(offset, value as u32),
             0x050..=0x05F => {}
             0x070 => self.irq.write_stat(value),
             0x074 => self.irq.write_mask(value),
@@ -359,7 +359,7 @@ impl Bus {
 
     fn store_io8(&mut self, offset: u32, address: u32, value: u8) {
         match offset {
-            0x040..=0x04F => self.sio.write(offset, value as u32, &mut self.irq),
+            0x040..=0x04F => self.sio.write(offset, value as u32),
             0x800..=0x803 => self.cdrom.write(offset - 0x800, value),
             0xC00..=0xFFF => self.spu.write(offset - 0xC00, value as u16),
             // Expansion 2 (POST) é escrita pelo BIOS a cada etapa do boot.
