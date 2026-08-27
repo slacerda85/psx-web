@@ -10,6 +10,9 @@ cargo run --release -p psx-core --example hwtest -- \
     --bios bios/SCPH1001.BIN --tests caminho/para/ps1-tests --verbose
 ```
 
+O diagnóstico detalhado de cada falha, com a evidência que a sustenta e o
+próximo passo, está em [erros-e-ajustes.md](erros-e-ajustes.md).
+
 **6 de 21 batendo com o hardware.** O que falta está abaixo, agrupado pelo tipo
 de trabalho que cada um exige.
 
