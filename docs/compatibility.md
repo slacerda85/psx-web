@@ -2,18 +2,21 @@
 
 ## Estado
 
-**Nenhum jogo comercial roda ainda.** O controlador de CD-ROM responde à
-máquina de comandos, mas não carrega imagens BIN/CUE, ISO ou CHD — sem isso
-não há de onde ler um jogo. Esse é o trabalho do agente `@cdrom` e o gargalo
-da Fase 4 do [plano](plano-emulador-psx-web.md).
+O CD-ROM lê imagens (ISO, BIN cru e BIN/CUE) e entrega setores por FIFO e por
+DMA. O Xenogears carrega do disco e executa o próprio código, com **zero**
+comandos de CD-ROM sem implementação.
 
-O que dá para exercitar hoje:
+**O bloqueio agora é o GTE.** `Gte::execute` conta o opcode e devolve os
+ciclos, sem implementar nenhum comando. Um jogo 3D roda, pede dezenas de
+milhares de transformações por segundo, recebe lixo de volta e não desenha
+nada — tela preta com o jogo vivo por trás.
 
 | Alvo | Situação |
 | --- | --- |
-| BIOS até o shell | `runUntilShell` existe; depende da BIOS que o usuário fornecer |
+| BIOS até o shell | Funciona: SCPH1001 chega ao menu principal |
 | Homebrew `PS-X EXE` | Carregável via `loadExe`, sem precisar de disco |
-| Jogos comerciais | Bloqueado pelo carregamento de imagem de disco |
+| Carregar jogo do disco | Funciona: setores são lidos e executados |
+| Ver o jogo na tela | Bloqueado pelo GTE |
 
 ## Como testar
 

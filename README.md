@@ -14,14 +14,15 @@ TypeScript sem framework, com WebGL2 para vídeo e `AudioWorklet` para som.
 | --- | --- |
 | CPU R3000A + COP0 | Interpretador MIPS I completo, exceções e delay slots |
 | Bus / mirrors / DMA / Timers / IRQ | Implementados |
-| GTE (COP2) | 23 comandos, aritmética fixed-point e flags de saturação |
+| GTE (COP2) | Banco de registradores e flags completos; **nenhum comando implementado** |
 | GPU | VRAM 1024×512, rasterizador por software, GP0/GP1, GPUSTAT |
 | SPU | Registradores, SPU RAM, DMA e geração de amostras; **mixagem das 24 vozes pendente** |
-| CD-ROM | Máquina de comandos parcial; **imagens BIN/CUE/ISO ainda não carregam** |
+| CD-ROM | Leitura de ISO, BIN cru e BIN/CUE; seek, leitura contínua 1x/2x, TOC e DMA |
 | SIO0 | Controller digital completo; **DualShock e memory card pendentes** |
 | Frontend | Vídeo, áudio, entrada, drag-and-drop, remapeamento e persistência |
 
-Cobertura atual: **158 testes** no core e **7 testes E2E** no frontend.
+Cobertura atual: **194 testes** no core (191 unitários + 3 de integração contra
+uma BIOS real) e **10 testes E2E** no frontend.
 
 O painel *Diagnóstico* da interface mostra contadores de funcionalidade não
 implementada em tempo real — se um jogo não roda, os números ali dizem qual
@@ -49,8 +50,16 @@ npm run dev
 ```
 
 Abra `http://localhost:5173` e arraste a sua BIOS para a janela (ou use
-*Escolher BIOS…*). Um arquivo `.exe` de homebrew pode ser carregado depois
-que a BIOS estiver no lugar.
+*Escolher BIOS…*). Com a BIOS no lugar:
+
+- **Jogo em ISO ou BIN de faixa única:** arraste o arquivo, ou use *Inserir disco…*.
+- **Jogo em CUE+BIN:** arraste os **dois arquivos juntos**. A folha sozinha não
+  diz onde estão os dados, e o nome que ela declara quase nunca bate com o
+  binário baixado.
+- **Homebrew:** *Carregar .exe*, sem precisar de disco.
+
+Uma imagem de jogo passa de 700 MB e é lida inteira para a memória. Funciona
+em desktop, mas é pesado — a leitura sob demanda ainda não existe.
 
 ## Comandos
 

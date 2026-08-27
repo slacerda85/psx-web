@@ -9,7 +9,7 @@ dos agentes, está em [plano-emulador-psx-web.md](plano-emulador-psx-web.md).
 `wasm-bindgen`. Ele recebe bytes, executa ciclos e devolve buffers. Quem lida
 com arquivos, telas e alto-falantes é o embedder.
 
-Isso não é purismo: é o que permite rodar 158 testes de emulação em ~30 ms com
+Isso não é purismo: é o que permite rodar 191 testes de emulação em poucos milissegundos com
 `cargo test`, sem navegador, sem headless browser e sem harness. Um bug de
 GTE é reproduzido num teste unitário de dez linhas, não num jogo travando.
 
@@ -111,6 +111,23 @@ A fila do worklet tem teto: se o main thread produzir mais rápido do que a
 saída consome, descartar o bloco mais antigo é melhor do que deixar a latência
 crescer indefinidamente.
 
+## CD-ROM
+
+O drive lê ISO (setores de 2048 B), BIN cru e BIN/CUE (2352 B). O formato é
+deduzido do padrão de sincronismo no início do arquivo, e não da extensão:
+imagens circulam renomeadas o tempo todo.
+
+O offset dos dados dentro de um setor cru sai do byte de modo do próprio
+setor, não de configuração — discos de PSX misturam Mode 1 (dados em +16) e
+Mode 2 Form 1 (dados em +24) no mesmo disco.
+
+O core não abre arquivos. Num CUE, quem localiza o binário referenciado é o
+embedder: o nome dentro da folha quase nunca sobrevive ao download.
+
+A imagem inteira fica em RAM hoje. Para um jogo de 700 MB isso é muito, e a
+evolução natural é entregar setores sob demanda — a interface de leitura já é
+por LBA justamente para permitir essa troca sem tocar no controlador.
+
 ## Persistência
 
 Tudo em IndexedDB, não em `localStorage`: a BIOS tem 512 KB e cada memory card
@@ -147,8 +164,12 @@ deixar o emulador falhar em silêncio:
 
 - **SPU** — os registradores, a RAM e o DMA funcionam, mas as 24 vozes ainda
   não são mixadas: não há ADPCM, ADSR nem reverb.
-- **CD-ROM** — a máquina de comandos responde, porém nenhuma imagem BIN/CUE,
-  ISO ou CHD é carregada ainda.
+- **GTE** — o banco de registradores, os espelhos e as flags estão completos,
+  mas `Gte::execute` ainda não implementa **nenhum** dos comandos: ele conta o
+  opcode e devolve os ciclos. É o que impede um jogo 3D de desenhar qualquer
+  coisa, mesmo carregando e executando normalmente.
+- **CD-ROM** — lê ISO, BIN cru e BIN/CUE. Falta CD-DA (faixas de áudio) e
+  XA-ADPCM; CHD não é suportado.
 - **SIO0** — o controller digital está completo; DualShock (modo analógico,
   config mode, rumble) e o protocolo de memory card não.
 - **GPU** — o rasterizador cobre polígonos, linhas, retângulos, mask bits e os
