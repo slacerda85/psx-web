@@ -648,6 +648,7 @@ impl Cpu {
             (LoadWidth::Half, false) => bus.load16(address) as u32,
             (LoadWidth::Word, _) => bus.load32(address),
         };
+        self.stall += crate::memory::access_cycles(address, width.bytes());
 
         self.load = (instruction.rt(), value);
     }
@@ -673,6 +674,7 @@ impl Cpu {
             LoadWidth::Half => bus.store16(address, value),
             LoadWidth::Word => bus.store32(address, value),
         }
+        self.stall += crate::memory::access_cycles(address, width.bytes());
     }
 
     fn op_lwl(&mut self, instruction: Instruction, bus: &mut Bus) {
@@ -800,6 +802,16 @@ enum LoadWidth {
 }
 
 impl LoadWidth {
+    /// Bytes que o acesso move — a largura decide o preço no barramento.
+    #[inline(always)]
+    const fn bytes(self) -> u8 {
+        match self {
+            LoadWidth::Byte => 1,
+            LoadWidth::Half => 2,
+            LoadWidth::Word => 4,
+        }
+    }
+
     #[inline(always)]
     const fn alignment_mask(self) -> u32 {
         match self {

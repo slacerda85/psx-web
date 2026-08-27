@@ -29,7 +29,7 @@ const REGION_MASK: [u32; 8] = [
 
 /// Converte um endereço virtual em endereço físico removendo o segmento.
 #[inline(always)]
-pub fn physical(addr: u32) -> u32 {
+pub const fn physical(addr: u32) -> u32 {
     addr & REGION_MASK[(addr >> 29) as usize]
 }
 
@@ -66,6 +66,94 @@ pub const REGION_EXPANSION_3: Range = Range(0x1FA0_0000, 2 * 1024 * 1024);
 pub const REGION_BIOS: Range = Range(0x1FC0_0000, 512 * 1024);
 /// Cache control, único registrador visível em KSEG2.
 pub const REGION_CACHE_CONTROL: Range = Range(0xFFFE_0130, 4);
+
+/// Ciclos que um acesso a dados **acrescenta** ao da instrução.
+///
+/// O barramento do PSX é lento e cada região tem o seu preço: a RAM cobra
+/// cerca de 5 ciclos, a scratchpad quase nada, e a SPU quase quarenta. Os
+/// valores vêm da medição do `cpu/access-time` do ps1-tests num console real,
+/// menos o ciclo que a instrução já custa por si.
+///
+/// Isso não é refinamento de precisão — é requisito para rodar jogo. A
+/// biblioteca da Sony espera VBlank com um prazo contado em **iterações** de
+/// um laço, não em tempo; uma CPU que executa toda instrução em um ciclo
+/// esgota o prazo antes do VBlank chegar, e a `VSync()` de todo jogo passa a
+/// reclamar de timeout.
+pub const fn access_cycles(address: u32, width: u8) -> u32 {
+    let physical = physical(address);
+    // A scratchpad é a cache de dados: chega junto com a instrução.
+    if REGION_SCRATCHPAD.contains(physical).is_some() {
+        return 0;
+    }
+    if REGION_RAM.contains(physical).is_some() {
+        return 4;
+    }
+    if REGION_IO.contains(physical).is_some() {
+        return io_access_cycles(physical - REGION_IO.0, width);
+    }
+    if REGION_BIOS.contains(physical).is_some() {
+        // ROM de 8 bits: cada byte a mais é outro acesso.
+        return match width {
+            1 => 6,
+            2 => 12,
+            _ => 24,
+        };
+    }
+    if REGION_EXPANSION_1.contains(physical).is_some() {
+        return match width {
+            1 => 6,
+            2 => 13,
+            _ => 25,
+        };
+    }
+    if REGION_EXPANSION_2.contains(physical).is_some() {
+        return match width {
+            1 => 10,
+            2 => 25,
+            _ => 55,
+        };
+    }
+    if REGION_EXPANSION_3.contains(physical).is_some() {
+        return match width {
+            1 => 6,
+            2 => 5,
+            _ => 9,
+        };
+    }
+    // Cache control responde na hora.
+    0
+}
+
+/// Ciclos extras dentro do bloco de I/O, que não tem um preço só.
+///
+/// O CD-ROM e a SPU ficam atrás de um barramento mais lento que o resto dos
+/// registradores, e a diferença é grande demais para ser aproximada por uma
+/// média — a SPU sozinha custa mais que dez acessos à RAM.
+const fn io_access_cycles(offset: u32, width: u8) -> u32 {
+    match offset {
+        // CD-ROM: 8, 14 e 26 ciclos conforme a largura.
+        0x800..=0x803 => match width {
+            1 => 7,
+            2 => 13,
+            _ => 25,
+        },
+        // SPU: o periférico mais lento do console.
+        0xC00..=0xFFF => match width {
+            1 | 2 => 17,
+            _ => 38,
+        },
+        // GPU.
+        0x810 | 0x814 => match width {
+            1 | 2 => 2,
+            _ => 3,
+        },
+        // O resto do bloco fica entre 2,9 e 3,8 ciclos.
+        _ => match width {
+            1 | 2 => 3,
+            _ => 2,
+        },
+    }
+}
 
 /// A CPU pode buscar instrução deste endereço?
 ///
