@@ -53,6 +53,9 @@ impl Gte {
     /// `MFC2` / `SWC2` — leitura de `cop2r0..31`.
     pub fn read_data(&self, index: usize) -> u32 {
         match index {
+            // VZ0, VZ1 e VZ2 são signed de 16 bits: o hardware só tem essas
+            // 16 linhas, e o que sobra da escrita não volta na leitura.
+            1 | 3 | 5 => self.data[index] as i16 as u32,
             // OTZ e SZ0..SZ3 são unsigned de 16 bits.
             7 | 16..=19 => self.data[index] & 0xFFFF,
             // IR0..IR3 são signed de 16 bits.
@@ -73,8 +76,17 @@ impl Gte {
     }
 
     /// `MTC2` / `LWC2` — escrita em `cop2r0..31`.
+    ///
+    /// Os registradores de 16 bits são truncados **na escrita**, e não
+    /// mascarados na leitura: o hardware simplesmente não tem as outras 16
+    /// linhas. Mascarar só na leitura deixaria o lixo visível para o resto do
+    /// core — foi assim que o `AVSZ3` somava as partes altas dos `SZ`.
     pub fn write_data(&mut self, index: usize, value: u32) {
         match index {
+            // VZ0..VZ2 e IR0..IR3: 16 bits com sinal.
+            1 | 3 | 5 | 8..=11 => self.data[index] = value as i16 as u32,
+            // OTZ e SZ0..SZ3: 16 bits sem sinal.
+            7 | 16..=19 => self.data[index] = value & 0xFFFF,
             // Escrever em SXYP empurra o FIFO de coordenadas de tela.
             15 => {
                 self.data[12] = self.data[13];
@@ -99,9 +111,12 @@ impl Gte {
     /// `CFC2` — leitura de `cop2r32..63`.
     pub fn read_control(&self, index: usize) -> u32 {
         match index {
-            // Quirk documentado: H (c26) é usado como unsigned mas lido com
-            // sinal estendido. DQA, ZSF3 e ZSF4 são signed de 16 bits.
-            26 | 27 | 29 | 30 => self.control[index] as i16 as u32,
+            // Registradores de 16 bits com sinal: os cantos das três matrizes
+            // (RT33, L33, LB3), DQA, ZSF3 e ZSF4.
+            //
+            // H (c26) entra na lista por um quirk documentado: é usado como
+            // unsigned na divisão, mas lido com o sinal estendido.
+            4 | 12 | 20 | 26 | 27 | 29 | 30 => self.control[index] as i16 as u32,
             31 => self.flag(),
             _ => self.control[index],
         }
@@ -110,6 +125,10 @@ impl Gte {
     /// `CTC2` — escrita em `cop2r32..63`.
     pub fn write_control(&mut self, index: usize, value: u32) {
         match index {
+            // Cantos das matrizes, DQA, ZSF3 e ZSF4: 16 bits com sinal.
+            4 | 12 | 20 | 27 | 29 | 30 => self.control[index] = value as i16 as u32,
+            // H é usado como unsigned na divisão, mesmo sendo lido com sinal.
+            26 => self.control[26] = value & 0xFFFF,
             31 => self.control[31] = value & 0x7FFF_F000,
             _ => self.control[index] = value,
         }

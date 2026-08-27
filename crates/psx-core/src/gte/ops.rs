@@ -123,15 +123,45 @@ impl Gte {
 
     /// Calcula `MAC1..3` a partir de três somas de 44 bits e copia para `IR`.
     fn set_mac_and_ir(&mut self, values: [i64; 3], sf: u32, lm: bool) {
+        let mut checked = [0i64; 3];
+        for (index, &value) in values.iter().enumerate() {
+            checked[index] = self.check_mac(index + 1, value);
+        }
+        self.store_mac_and_ir(checked, sf, lm);
+    }
+
+    /// Guarda valores **já checados** em `MAC1..3` e propaga para `IR1..3`.
+    fn store_mac_and_ir(&mut self, values: [i64; 3], sf: u32, lm: bool) {
         let mut macs = [0i32; 3];
         for (index, &value) in values.iter().enumerate() {
-            let checked = self.check_mac(index + 1, value);
-            macs[index] = (checked >> sf) as i32;
+            macs[index] = (value >> sf) as i32;
             self.data[MAC1 + index] = macs[index] as u32;
         }
         for (index, &mac) in macs.iter().enumerate() {
             self.set_ir(index + 1, mac, lm);
         }
+    }
+
+    /// Acumula `base + Σ matrix_row[i] * vector[i]`, checando o overflow de 44
+    /// bits **a cada produto somado**.
+    ///
+    /// O hardware é um multiplicador-acumulador de três estágios, e a flag é
+    /// avaliada em cada estágio. A diferença aparece quando a soma estoura para
+    /// cima num termo e volta para baixo no seguinte: o resultado final é o
+    /// mesmo que somar tudo de uma vez, mas as duas flags de overflow ficam
+    /// acesas. Somar em bloco e checar no fim não acende nenhuma.
+    fn multiply_accumulate(
+        &mut self,
+        row: usize,
+        base: i64,
+        matrix_row: [i64; 3],
+        vector: [i64; 3],
+    ) -> i64 {
+        let mut accumulator = base;
+        for (factor, coordinate) in matrix_row.iter().zip(vector.iter()) {
+            accumulator = self.check_mac(row + 1, accumulator + factor * coordinate);
+        }
+        accumulator
     }
 
     // ------------------------------------------------------------------ FIFOs
@@ -342,8 +372,7 @@ impl Gte {
         let mut macs = [0i32; 3];
         let mut mac3_full = 0i64;
         for row in 0..3 {
-            let sum = tr[row] * 0x1000 + rt[row][0] * v[0] + rt[row][1] * v[1] + rt[row][2] * v[2];
-            let checked = self.check_mac(row + 1, sum);
+            let checked = self.multiply_accumulate(row, tr[row] * 0x1000, rt[row], v);
             if row == 2 {
                 mac3_full = checked;
             }
@@ -375,19 +404,23 @@ impl Gte {
         let ir1 = self.data[9] as i16 as i64;
         let ir2 = self.data[10] as i16 as i64;
 
-        let x = self.set_mac0(quotient * ir1 + ofx) as i64 >> 16;
-        // `set_mac0` já registrou o overflow; a projeção usa o valor truncado.
-        let y = {
-            let raw = quotient * ir2 + ofy;
-            self.set_mac0(raw) as i64 >> 16
-        };
-        self.push_sxy(x, y);
+        // A coordenada de tela sai do resultado **inteiro**, não do MAC0 já
+        // truncado em 32 bits. O registrador guarda a versão truncada e marca
+        // o overflow, mas a saturação em -1024..1023 olha o valor completo —
+        // com o truncado, um resultado grande e positivo vira um número
+        // negativo pequeno e a saturação nem chega a ser detectada.
+        let screen_x = quotient * ir1 + ofx;
+        self.set_mac0(screen_x);
+        let screen_y = quotient * ir2 + ofy;
+        self.set_mac0(screen_y);
+        self.push_sxy(screen_x >> 16, screen_y >> 16);
 
         if last {
             let dqa = self.control[27] as i16 as i64;
             let dqb = self.control[28] as i32 as i64;
-            let depth = self.set_mac0(quotient * dqa + dqb);
-            self.set_ir0(depth >> 12);
+            let depth = quotient * dqa + dqb;
+            self.set_mac0(depth);
+            self.set_ir0((depth >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32);
         }
     }
 
@@ -441,8 +474,11 @@ impl Gte {
     fn avsz3(&mut self) {
         let zsf3 = self.control[29] as i16 as i64;
         let sum = self.data[17] as i64 + self.data[18] as i64 + self.data[19] as i64;
-        let value = self.set_mac0(zsf3 * sum);
-        self.set_otz(value >> 12);
+        // Como no RTPS, a saturação olha o resultado inteiro: o MAC0 truncado
+        // em 32 bits pode ter trocado de sinal e saturaria para o lado errado.
+        let full = zsf3 * sum;
+        self.set_mac0(full);
+        self.set_otz(full >> 12);
     }
 
     /// `AVSZ4` — média ponderada de `SZ0..SZ3`.
@@ -452,11 +488,12 @@ impl Gte {
             + self.data[17] as i64
             + self.data[18] as i64
             + self.data[19] as i64;
-        let value = self.set_mac0(zsf4 * sum);
-        self.set_otz(value >> 12);
+        let full = zsf4 * sum;
+        self.set_mac0(full);
+        self.set_otz(full >> 12);
     }
 
-    fn set_otz(&mut self, value: i32) {
+    fn set_otz(&mut self, value: i64) {
         if !(0..=0xFFFF).contains(&value) {
             self.set_flag(Flag::SZ3_OTZ_SATURATED);
         }
@@ -501,12 +538,12 @@ impl Gte {
     ) {
         let mut sums = [0i64; 3];
         for (row, sum) in sums.iter_mut().enumerate() {
-            *sum = translation[row] * 0x1000
-                + matrix[row][0] * vector[0]
-                + matrix[row][1] * vector[1]
-                + matrix[row][2] * vector[2];
+            *sum = translation[row] * 0x1000;
         }
-        self.set_mac_and_ir(sums, command.sf, command.lm);
+        for row in 0..3 {
+            sums[row] = self.multiply_accumulate(row, sums[row], matrix[row], vector);
+        }
+        self.store_mac_and_ir(sums, command.sf, command.lm);
     }
 
     /// `MVMVA` com `cv = 2` (far color) é **bugado no hardware**.
@@ -611,9 +648,9 @@ impl Gte {
         let v = self.vector(vector);
         let mut sums = [0i64; 3];
         for (row, sum) in sums.iter_mut().enumerate() {
-            *sum = llm[row][0] * v[0] + llm[row][1] * v[1] + llm[row][2] * v[2];
+            *sum = self.multiply_accumulate(row, 0, llm[row], v);
         }
-        self.set_mac_and_ir(sums, command.sf, command.lm);
+        self.store_mac_and_ir(sums, command.sf, command.lm);
 
         self.color_matrix(command);
     }
@@ -625,18 +662,21 @@ impl Gte {
         let ir = self.ir_vector();
         let mut sums = [0i64; 3];
         for (row, sum) in sums.iter_mut().enumerate() {
-            *sum =
-                bk[row] * 0x1000 + lcm[row][0] * ir[0] + lcm[row][1] * ir[1] + lcm[row][2] * ir[2];
+            *sum = self.multiply_accumulate(row, bk[row] * 0x1000, lcm[row], ir);
         }
-        self.set_mac_and_ir(sums, command.sf, command.lm);
+        self.store_mac_and_ir(sums, command.sf, command.lm);
     }
 
     /// Multiplica `IR` pela cor do vértice, deixando o resultado em `MAC`.
+    ///
+    /// Passa por `check_mac`: é uma operação de acumulador como qualquer
+    /// outra, e escrever `MAC` direto engoliria as flags de overflow.
     fn apply_vertex_color(&mut self) {
         let rgb = self.rgb();
         let ir = self.ir_vector();
         for row in 0..3 {
-            self.data[MAC1 + row] = ((rgb[row] * ir[row]) << 4) as i32 as u32;
+            let checked = self.check_mac(row + 1, (rgb[row] * ir[row]) << 4);
+            self.data[MAC1 + row] = checked as i32 as u32;
         }
     }
 
