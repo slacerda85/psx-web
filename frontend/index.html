@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Emulador de PlayStation 1 que roda inteiramente no navegador, em WebAssembly."
+    />
+    <title>PSX Web</title>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <h1 class="brand">PSX<span>Web</span></h1>
+        <div class="status" role="status" aria-live="polite">
+          <span class="chip" id="chip-bios" data-state="off">BIOS</span>
+          <span class="chip" id="chip-disc" data-state="off">Disco</span>
+          <span class="chip" id="chip-pad" data-state="off">Controle</span>
+          <span class="chip" id="chip-audio" data-state="off">Áudio</span>
+          <span class="chip metric" id="chip-fps">— fps</span>
+        </div>
+      </header>
+
+      <main class="stage" id="stage">
+        <canvas id="screen" width="320" height="240" aria-label="Saída de vídeo do emulador"></canvas>
+        <div class="dropzone" id="dropzone" hidden>
+          <p>Solte a BIOS, um <code>.exe</code> ou uma imagem de disco</p>
+        </div>
+        <div class="onboarding" id="onboarding">
+          <h2>Carregue uma BIOS para começar</h2>
+          <p>
+            Este emulador <strong>não inclui</strong> BIOS nem jogos. Use o arquivo extraído do seu
+            próprio console — ele fica apenas no seu navegador e nunca é enviado a lugar nenhum.
+          </p>
+          <div class="onboarding-actions">
+            <button type="button" class="primary" id="pick-bios">Escolher BIOS…</button>
+            <button type="button" id="pick-exe">Carregar .exe</button>
+          </div>
+          <p class="hint">Ou arraste o arquivo para esta janela.</p>
+        </div>
+      </main>
+
+      <section class="controls" aria-label="Controles do emulador">
+        <button type="button" id="btn-run" disabled>Iniciar</button>
+        <button type="button" id="btn-reset" disabled>Reiniciar</button>
+        <button type="button" id="btn-fast" disabled aria-pressed="false">Avanço rápido</button>
+        <label class="field">
+          Região
+          <select id="select-region">
+            <option value="ntsc" selected>NTSC</option>
+            <option value="pal">PAL</option>
+          </select>
+        </label>
+        <label class="field">
+          Escala
+          <select id="select-scaling">
+            <option value="sharp" selected>Nítida</option>
+            <option value="smooth">Suave</option>
+          </select>
+        </label>
+        <label class="field volume">
+          Volume
+          <input type="range" id="volume" min="0" max="100" value="80" />
+        </label>
+        <button type="button" id="btn-mute" aria-pressed="false">Mudo</button>
+        <button type="button" id="btn-keys">Controles…</button>
+      </section>
+
+      <details class="panel" id="diagnostics-panel">
+        <summary>Diagnóstico</summary>
+        <p class="panel-note">
+          Contadores de funcionalidade ainda não implementada. Números crescendo aqui explicam
+          por que um jogo específico não roda.
+        </p>
+        <dl class="diagnostics" id="diagnostics"></dl>
+      </details>
+
+      <footer class="footer">
+        <span id="version">psx-core —</span>
+        <span>Nenhuma BIOS ou jogo é distribuído com este projeto.</span>
+      </footer>
+    </div>
+
+    <dialog class="keys-dialog" id="keys-dialog">
+      <form method="dialog">
+        <h2>Mapeamento de controles</h2>
+        <p class="panel-note">Clique em um botão e pressione a tecla desejada. <kbd>Esc</kbd> cancela.</p>
+        <ul class="keys-list" id="keys-list"></ul>
+        <menu>
+          <button type="button" id="keys-reset">Restaurar padrão</button>
+          <button value="close" class="primary">Fechar</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="alert" hidden></div>
+
+    <input type="file" id="file-input" accept=".bin,.rom,.exe,.psexe,.iso,.cue,.img" hidden />
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
