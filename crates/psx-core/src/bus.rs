@@ -216,7 +216,14 @@ impl Bus {
         self.unhandled_write(address);
     }
 
-    pub fn store16(&mut self, address: u32, value: u16) {
+    /// Escrita de meia-palavra.
+    ///
+    /// `source` é o registrador inteiro que o CPU está gravando. O barramento
+    /// dos periféricos não tem byte-enable: numa escrita estreita para um
+    /// registrador de 32 bits, o hardware latcha os 32 bits do CPU, e não só a
+    /// parte endereçada. Para RAM e scratchpad vale só a metade baixa.
+    pub fn store16(&mut self, address: u32, source: u32) {
+        let value = source as u16;
         let physical = memory::physical(address);
 
         if let Some(offset) = memory::REGION_RAM.contains(physical) {
@@ -229,7 +236,7 @@ impl Bus {
             return;
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
-            self.store_io16(offset, physical, value);
+            self.store_io16(offset, physical, source);
             return;
         }
         if memory::REGION_BIOS.contains(physical).is_some()
@@ -243,7 +250,9 @@ impl Bus {
         self.unhandled_write(address);
     }
 
-    pub fn store8(&mut self, address: u32, value: u8) {
+    /// Escrita de byte. Ver [`Self::store16`] sobre `source`.
+    pub fn store8(&mut self, address: u32, source: u32) {
+        let value = source as u8;
         let physical = memory::physical(address);
 
         if let Some(offset) = memory::REGION_RAM.contains(physical) {
@@ -255,7 +264,7 @@ impl Bus {
             return;
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
-            self.store_io8(offset, physical, value);
+            self.store_io8(offset, physical, source);
             return;
         }
         if memory::REGION_BIOS.contains(physical).is_some()
@@ -282,7 +291,12 @@ impl Bus {
             0x074 => self.irq.mask() as u32,
             0x080..=0x0FF => self.dma.read(offset),
             0x100..=0x12F => self.timers.read(offset - 0x100),
-            0x800..=0x803 => self.cdrom.read(offset - 0x800) as u32,
+            // O bloco do CD-ROM só tem registradores de 8 bits: uma leitura
+            // larga devolve o mesmo byte replicado nas quatro posições.
+            0x800..=0x803 => {
+                let byte = self.cdrom.read(offset - 0x800) as u32;
+                byte * 0x0101_0101
+            }
             0x810 => self.gpu.read(),
             0x814 => self.gpu.status(),
             0x820 => self.mdec.read_data(),
@@ -303,7 +317,10 @@ impl Bus {
             0x070 => self.irq.stat(),
             0x074 => self.irq.mask(),
             0x100..=0x12F => self.timers.read(offset - 0x100) as u16,
-            0x800..=0x803 => self.cdrom.read(offset - 0x800) as u16,
+            0x800..=0x803 => {
+                let byte = self.cdrom.read(offset - 0x800) as u16;
+                byte * 0x0101
+            }
             0xC00..=0xFFF => self.spu.read(offset - 0xC00),
             _ => self.unhandled_read(address) as u16,
         }
@@ -345,8 +362,19 @@ impl Bus {
         }
     }
 
-    fn store_io16(&mut self, offset: u32, address: u32, value: u16) {
+    /// Escrita estreita que alcança um registrador de 32 bits.
+    ///
+    /// O periférico recebe a palavra inteira do CPU, alinhada: é o que o
+    /// console faz, e é por isso que escrever um byte em `DMA0_ADDR` grava o
+    /// endereço completo em vez de um byte solto.
+    fn store_io_wide(&mut self, offset: u32, address: u32, source: u32) {
+        self.store_io32(offset & !3, address & !3, source);
+    }
+
+    fn store_io16(&mut self, offset: u32, address: u32, source: u32) {
+        let value = source as u16;
         match offset {
+            // Periféricos de 16 bits: a meia-palavra endereçada é a unidade.
             0x040..=0x04F => self.sio.write(offset, value as u32),
             0x050..=0x05F => {}
             0x070 => self.irq.write_stat(value),
@@ -354,17 +382,22 @@ impl Bus {
             0x100..=0x12F => self.timers.write(offset - 0x100, value as u32),
             0x800..=0x803 => self.cdrom.write(offset - 0x800, value as u8),
             0xC00..=0xFFF => self.spu.write(offset - 0xC00, value),
-            _ => self.unhandled_write(address),
+            _ => self.store_io_wide(offset, address, source),
         }
     }
 
-    fn store_io8(&mut self, offset: u32, address: u32, value: u8) {
+    fn store_io8(&mut self, offset: u32, address: u32, source: u32) {
         match offset {
-            0x040..=0x04F => self.sio.write(offset, value as u32),
-            0x800..=0x803 => self.cdrom.write(offset - 0x800, value),
-            0xC00..=0xFFF => self.spu.write(offset - 0xC00, value as u16),
-            // Expansion 2 (POST) é escrita pelo BIOS a cada etapa do boot.
-            _ => self.unhandled_write(address),
+            0x040..=0x04F => self.sio.write(offset, source),
+            0x800..=0x803 => self.cdrom.write(offset - 0x800, source as u8),
+            // Num periférico de 16 bits, escrever um byte latcha a meia-palavra
+            // inteira do CPU: não há byte-enable para descartar a outra metade.
+            0x050..=0x05F => {}
+            0x070 => self.irq.write_stat(source as u16),
+            0x074 => self.irq.write_mask(source as u16),
+            0x100..=0x12F => self.timers.write(offset - 0x100, source),
+            0xC00..=0xFFF => self.spu.write((offset - 0xC00) & !1, source as u16),
+            _ => self.store_io_wide(offset, address, source),
         }
     }
 

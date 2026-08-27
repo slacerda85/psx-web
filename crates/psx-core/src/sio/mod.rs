@@ -211,7 +211,9 @@ impl Sio {
     pub fn write(&mut self, offset: u32, value: u32) {
         match offset & 0x0F {
             0x00 => self.transfer(value as u8),
-            0x08 => self.mode = value as u16,
+            // JOY_MODE só implementa o fator de baudrate, o tamanho do
+            // caractere, a paridade e a polaridade do clock.
+            0x08 => self.mode = (value as u16) & 0x013F,
             0x0A => self.write_control(value as u16),
             0x0E => self.baud = value as u16,
             _ => {}

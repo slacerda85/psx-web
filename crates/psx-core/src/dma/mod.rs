@@ -227,8 +227,14 @@ impl DmaInterrupt {
     }
 
     /// Sinaliza o fim de uma transferência no canal `port`.
+    ///
+    /// O flag só sobe se o canal tiver a interrupção habilitada em `DICR`.
+    /// Levantá-lo sempre deixava bits acesos que o software nunca reconhece,
+    /// porque ele só limpa os canais que pediu para observar.
     pub fn raise(&mut self, port: Port) {
-        self.flags |= 1 << (port as u32);
+        if self.enable & (1 << (port as u32)) != 0 {
+            self.flags |= 1 << (port as u32);
+        }
     }
 }
 

@@ -144,9 +144,11 @@ impl Mdec {
     pub fn status(&self) -> u32 {
         let mut status = 0u32;
 
-        // Bits 0..15: palavras restantes menos 1 (0xFFFF quando não há comando).
-        let remaining = self.remaining.wrapping_sub(1) & 0xFFFF;
-        status |= remaining;
+        // Bits 0..15: palavras restantes menos 1. Sem comando em andamento o
+        // console reporta zero, e não o 0xFFFF que a documentação sugere.
+        if self.remaining > 0 {
+            status |= (self.remaining - 1) & 0xFFFF;
+        }
 
         // Bits 16..18: bloco corrente. Sem modelar o pipeline interno, o valor
         // só precisa ser estável.

@@ -658,8 +658,8 @@ impl Cpu {
 
         let value = self.reg(instruction.rt());
         match width {
-            LoadWidth::Byte => bus.store8(address, value as u8),
-            LoadWidth::Half => bus.store16(address, value as u16),
+            LoadWidth::Byte => bus.store8(address, value),
+            LoadWidth::Half => bus.store16(address, value),
             LoadWidth::Word => bus.store32(address, value),
         }
     }
