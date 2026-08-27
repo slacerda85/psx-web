@@ -102,6 +102,9 @@ docs/                Plano, arquitetura e notas de deploy
 bytes é o embedder. É isso que permite testar a emulação inteira fora do
 navegador, com `cargo test`.
 
+As pendências verificadas contra o console real estão em
+[docs/pendencias-hardware.md](docs/pendencias-hardware.md).
+
 Ver [docs/architecture.md](docs/architecture.md) para o desenho do sistema e
 [docs/plano-emulador-psx-web.md](docs/plano-emulador-psx-web.md) para o plano
 original com o roadmap por fases.
