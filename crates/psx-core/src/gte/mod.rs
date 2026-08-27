@@ -2,13 +2,16 @@
 //!
 //! Referência: PSX-SPX — "Geometry Transformation Engine (GTE)".
 //!
-//! **Estado atual:** o banco de registradores está completo e fiel ao hardware
-//! (incluindo os espelhos, o FIFO de `SXY`, `IRGB`/`ORGB` e `LZCS`/`LZCR`).
-//! Os *comandos* ainda não estão implementados — essa é a entrega do agente
-//! `@gte`. Comandos recebidos são contabilizados em
+//! **Estado atual:** banco de registradores completo (incluindo os espelhos, o
+//! FIFO de `SXY`, `IRGB`/`ORGB` e `LZCS`/`LZCR`) e os 22 comandos
+//! implementados em [`ops`], com a aritmética de 44 bits, as flags de
+//! saturação e a divisão UNR do hardware.
+//!
+//! Opcodes fora da lista continuam sendo contabilizados em
 //! [`Gte::unimplemented_commands`] em vez de falharem em silêncio.
 
 mod flags;
+mod ops;
 
 pub use flags::Flag;
 
@@ -16,9 +19,9 @@ pub use flags::Flag;
 #[derive(Clone)]
 pub struct Gte {
     /// `cop2r0..31` — registradores de dados.
-    data: [u32; 32],
+    pub(self) data: [u32; 32],
     /// `cop2r32..63` — registradores de controle.
-    control: [u32; 32],
+    pub(self) control: [u32; 32],
     /// Comandos recebidos que ainda não têm implementação.
     unimplemented: u64,
     /// Último comando não implementado, para diagnóstico.
@@ -127,14 +130,16 @@ impl Gte {
 
     /// Executa um comando `COP2 imm25`. Devolve os ciclos consumidos.
     pub fn execute(&mut self, command: u32) -> u32 {
-        let opcode = command & 0x3F;
+        let decoded = ops::Command::decode(command);
         // Todo comando começa zerando FLAG.
         self.control[31] = 0;
 
-        self.unimplemented += 1;
-        self.last_unimplemented = opcode;
+        if !self.dispatch(decoded) {
+            self.unimplemented += 1;
+            self.last_unimplemented = decoded.opcode;
+        }
 
-        command_cycles(opcode)
+        command_cycles(decoded.opcode)
     }
 }
 
@@ -281,13 +286,27 @@ mod tests {
     }
 
     #[test]
-    fn command_clears_flag_and_is_counted_as_unimplemented() {
+    fn a_known_command_is_not_counted_as_unimplemented() {
         let mut gte = Gte::new();
-        gte.write_control(31, 1 << 13);
         let cycles = gte.execute(0x0018_0001); // RTPS
         assert_eq!(cycles, 15);
-        assert_eq!(gte.read_control(31), 0);
+        assert_eq!(gte.unimplemented_commands(), 0);
+    }
+
+    #[test]
+    fn an_unknown_opcode_is_counted_instead_of_ignored() {
+        let mut gte = Gte::new();
+        gte.execute(0x0000_0002); // opcode 0x02 não existe
         assert_eq!(gte.unimplemented_commands(), 1);
-        assert_eq!(gte.last_unimplemented_command(), 0x01);
+        assert_eq!(gte.last_unimplemented_command(), 0x02);
+    }
+
+    #[test]
+    fn every_command_clears_flag_before_running() {
+        let mut gte = Gte::new();
+        gte.write_control(31, 1 << 13);
+        // NCLIP com o FIFO zerado não levanta nenhuma flag.
+        gte.execute(0x0000_0006);
+        assert_eq!(gte.read_control(31), 0, "FLAG é zerada a cada comando");
     }
 }
