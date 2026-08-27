@@ -24,6 +24,8 @@ struct Options {
     disc: Option<String>,
     frames: u32,
     output: String,
+    /// Grava a VRAM inteira (1024x512) em vez da janela de display.
+    vram: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,9 +49,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         system.run_frame();
     }
 
-    let width = system.frame_width();
-    let height = system.frame_height();
-    let pixels = system.framebuffer();
+    // A VRAM inteira separa dois diagnósticos que a janela de display confunde:
+    // "a GPU não desenhou nada" e "desenhou fora da área que está sendo exibida".
+    println!("display : {:?}", system.bus().gpu.display_state());
+    let vram = system.bus().gpu.vram().as_slice();
+    let vram_used = vram.iter().filter(|&&pixel| pixel != 0).count();
+    println!(
+        "vram    : {vram_used} de {} halfwords não-zero ({:.1}%)",
+        vram.len(),
+        vram_used as f64 / vram.len() as f64 * 100.0
+    );
+
+    let (width, height, owned);
+    let pixels: &[u8] = if options.vram {
+        width = psx_core::gpu::VRAM_WIDTH as u32;
+        height = psx_core::gpu::VRAM_HEIGHT as u32;
+        owned = vram
+            .iter()
+            .flat_map(|&pixel| {
+                let r = ((pixel & 0x1F) << 3) as u8;
+                let g = (((pixel >> 5) & 0x1F) << 3) as u8;
+                let b = (((pixel >> 10) & 0x1F) << 3) as u8;
+                [r, g, b, 0xFF]
+            })
+            .collect::<Vec<u8>>();
+        &owned
+    } else {
+        width = system.frame_width();
+        height = system.frame_height();
+        system.framebuffer()
+    };
 
     let non_black = count_non_black(pixels, width, height);
     let total = (width * height) as u64;
@@ -94,6 +123,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         disc: None,
         frames: 300,
         output: "screenshot.bmp".into(),
+        vram: false,
     };
 
     let mut args = std::env::args().skip(1);
@@ -107,6 +137,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
             "--disc" => options.disc = Some(value()?),
             "--frames" => options.frames = value()?.parse()?,
             "--out" => options.output = value()?,
+            "--vram" => options.vram = true,
             other => return Err(format!("opção desconhecida: {other}").into()),
         }
     }
