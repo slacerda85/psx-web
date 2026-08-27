@@ -118,6 +118,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // O que o kernel imprimiu: um "VSync: timeout" ou um erro de boot diz
+    // mais em uma linha do que o histograma inteiro.
+    let tty = system.tty();
+    if !tty.is_empty() {
+        println!(
+            "
+últimas linhas da TTY:"
+        );
+        for line in tty.lines().rev().take(12).collect::<Vec<_>>().iter().rev() {
+            println!("  {line}");
+        }
+    }
+
     println!("\nestado final:");
     println!(
         "  I_STAT={:#06X} I_MASK={:#06X} pendente={}",

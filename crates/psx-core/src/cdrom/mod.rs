@@ -70,10 +70,19 @@ mod mode {
 mod submode {
     /// O setor carrega áudio ADPCM.
     pub const AUDIO: u8 = 1 << 2;
-    /// Form 2: 2324 bytes de carga e sem correção de erro.
-    pub const FORM2: u8 = 1 << 5;
     /// Tempo real: o drive entrega no compasso, sem reler em caso de erro.
     pub const REAL_TIME: u8 = 1 << 6;
+}
+
+/// Para onde vai um setor lido do disco.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    /// Entregue ao CPU com uma INT1.
+    Data,
+    /// Encaminhado ao decodificador de áudio XA.
+    Adpcm,
+    /// Ninguém o quer: o drive o descarta em silêncio.
+    Discard,
 }
 
 /// Uma resposta agendada, entregue depois de `delay` ciclos.
@@ -123,6 +132,8 @@ pub struct CdRom {
     drive: Drive,
     /// Ciclos que faltam para o próximo setor ficar pronto.
     next_sector_in: i64,
+    /// A entrega do setor corrente já falhou uma vez por INT pendente.
+    delivery_retry: bool,
 
     /// Setor entregue ao CPU ou ao DMA.
     sector_buffer: Vec<u8>,
@@ -144,6 +155,11 @@ pub struct CdRom {
 
     /// Setores entregues desde o boot, para diagnóstico.
     sectors_delivered: u64,
+    /// Setores que o CPU chegou a recolher, dos que foram entregues.
+    ///
+    /// A diferença entre os dois separa "o drive não entrega" de "o jogo
+    /// recusa o que recebeu" — as duas travas se parecem de fora.
+    sectors_collected: u64,
     /// Comandos recebidos sem implementação, para diagnóstico.
     unimplemented: u64,
     last_unimplemented: u8,
@@ -204,6 +220,7 @@ impl CdRom {
             read_lba: 0,
             drive: Drive::Idle,
             next_sector_in: 0,
+            delivery_retry: false,
             sector_buffer: Vec::new(),
             sector_cursor: 0,
             data_requested: false,
@@ -212,6 +229,7 @@ impl CdRom {
             history: VecDeque::with_capacity(16),
             header_valid: false,
             sectors_delivered: 0,
+            sectors_collected: 0,
             unimplemented: 0,
             last_unimplemented: 0,
         }
@@ -248,9 +266,10 @@ impl CdRom {
     /// drive ainda está lendo, e há resposta presa na fila sem acknowledge?
     pub fn debug_state(&self) -> String {
         format!(
-            "drive={:?} setores={} lba={} pendentes={} flags={:#04X} enable={:#04X} bfrd={} novo={} fifo={}/{} modo={:#04X}",
+            "drive={:?} setores={} recolhidos={} lba={} pendentes={} flags={:#04X} enable={:#04X} bfrd={} novo={} fifo={}/{} modo={:#04X}",
             self.drive,
             self.sectors_delivered,
+            self.sectors_collected,
             self.read_lba,
             self.pending.len(),
             self.interrupt_flags,
@@ -311,32 +330,41 @@ impl CdRom {
         }
     }
 
-    /// O setor em `lba` é áudio XA que o drive toca sozinho?
+    /// O que o drive faz com o setor em `lba`.
     ///
-    /// Só quando o `Setmode` pediu ADPCM e o subheader marca áudio em tempo
-    /// real. Com o filtro ligado, arquivo e canal também precisam casar com o
-    /// que o `Setfilter` selecionou — é assim que um jogo escolhe uma trilha
-    /// entre as várias intercaladas no mesmo arquivo.
-    fn is_adpcm_sector(&self, lba: u32) -> bool {
-        if self.mode & mode::XA_ADPCM == 0 {
-            return false;
-        }
+    /// PSX-SPX — "Data/ADPCM Sector Filtering/Delivery": o controlador tenta
+    /// primeiro entregar ao decodificador ADPCM e, se não couber ali, ao CPU;
+    /// se nenhum dos dois aceitar, o setor é descartado em silêncio.
+    ///
+    /// `retry` diz se esta é a **segunda** tentativa de entrega, depois de a
+    /// primeira ter esbarrado numa interrupção pendente. A diferença importa:
+    /// só a segunda confere arquivo e canal. O hardware é assim, e é o que
+    /// permite a um jogo isolar um canal de um arquivo STR multiplexado.
+    fn classify(&self, lba: u32, retry: bool) -> Delivery {
         let Some([file, channel, flags, _]) =
             self.disc.as_ref().and_then(|disc| disc.subheader(lba))
         else {
-            return false;
+            // Sem subheader não é Mode 2: só pode ser dado.
+            return Delivery::Data;
         };
-        const AUDIO_SECTOR: u8 = submode::AUDIO | submode::FORM2 | submode::REAL_TIME;
-        if flags & AUDIO_SECTOR != AUDIO_SECTOR {
-            return false;
+
+        const AUDIO_SECTOR: u8 = submode::AUDIO | submode::REAL_TIME;
+        let is_audio = flags & AUDIO_SECTOR == AUDIO_SECTOR;
+        let filtering = self.mode & mode::XA_FILTER != 0;
+        let matches_filter = file == self.filter_file && channel == self.filter_channel;
+
+        if self.mode & mode::XA_ADPCM != 0 && is_audio && (!filtering || matches_filter) {
+            return Delivery::Adpcm;
         }
-        if self.mode & mode::XA_FILTER != 0
-            && (file != self.filter_file || channel != self.filter_channel)
-        {
-            // Fora do filtro: o setor é descartado, nem tocado nem entregue.
-            return true;
+        // Com o filtro ligado, áudio em tempo real nunca vira dado — nem
+        // quando o ADPCM está desligado ou o canal não casa.
+        if filtering && is_audio {
+            return Delivery::Discard;
         }
-        true
+        if retry && filtering && !matches_filter {
+            return Delivery::Discard;
+        }
+        Delivery::Data
     }
 
     /// Produz o próximo setor quando o drive está lendo.
@@ -355,21 +383,25 @@ impl CdRom {
         // nesse intervalo sobrescreveria o que o CPU ainda vai ler. O jogo
         // perde um setor no meio de um arquivo, o checksum falha e ele relê o
         // mesmo trecho para sempre — que é exatamente como o Xenogears travava.
+        //
+        // É também a primeira das duas tentativas de entrega do hardware: ao
+        // esbarrar aqui, a próxima passa a conferir arquivo e canal.
         if !self.pending.is_empty() || self.interrupt_flags != 0 {
+            self.delivery_retry = true;
             self.next_sector_in = 0;
             return;
         }
+        let retry = std::mem::replace(&mut self.delivery_retry, false);
         self.next_sector_in += self.cycles_per_sector();
 
         let whole = self.mode & mode::WHOLE_SECTOR != 0;
         let lba = self.read_lba;
 
-        // Um setor de áudio XA não é entregue ao CPU: o drive o encaminha ao
+        // Um setor de áudio XA não chega ao CPU: o drive o encaminha ao
         // decodificador ADPCM, que toca o som sem passar pela CPU. Entregá-lo
         // como se fosse dado enche o jogo de INT1 que ele não pediu — o
-        // Grandstream Saga recebe mais setores de áudio do que de dados e
-        // nunca sai da tela de carregamento.
-        if self.is_adpcm_sector(lba) {
+        // Grandstream Saga recebe mais setores de áudio do que de dados.
+        if self.classify(lba, retry) != Delivery::Data {
             self.position = Msf::from_lba(lba);
             self.read_lba = lba.wrapping_add(1);
             return;
@@ -520,6 +552,7 @@ impl CdRom {
                 std::mem::swap(&mut self.sector_buffer, &mut self.staged_sector);
                 self.sector_cursor = 0;
                 self.sector_available = false;
+                self.sectors_collected += 1;
             }
             self.data_requested = true;
         } else {
