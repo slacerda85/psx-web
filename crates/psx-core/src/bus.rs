@@ -374,15 +374,54 @@ impl Bus {
     /// O hardware intercala DMA e CPU; aqui a transferência é atômica, o que é
     /// suficiente enquanto o scheduler não for ciclo-a-ciclo.
     pub fn run_dma(&mut self, port: Port) {
-        match self.dma.channel(port).sync() {
-            Sync::LinkedList => self.run_dma_linked_list(port),
-            _ => self.run_dma_block(port),
+        match port {
+            Port::Otc => self.run_dma_otc(),
+            _ => match self.dma.channel(port).sync() {
+                Sync::LinkedList => self.run_dma_linked_list(port),
+                _ => self.run_dma_block(port),
+            },
         }
 
         self.dma.channel_mut(port).finish();
         self.dma.raise_interrupt(port);
         if self.dma.take_interrupt_edge() {
             self.irq.raise(Interrupt::Dma);
+        }
+    }
+
+    /// Canal 6 — limpeza da ordering table.
+    ///
+    /// É o único canal cabeado: o hardware ignora direção, passo e sync mode,
+    /// sempre escrevendo para a RAM e sempre andando para trás. Honrar esses
+    /// campos, como fazíamos, deixava o canal inerte em qualquer configuração
+    /// fora da manual — o jogo pedia a tabela e recebia o lixo anterior.
+    fn run_dma_otc(&mut self) {
+        let channel = *self.dma.channel(Port::Otc);
+        let mut address = channel.base;
+        // Sem sync mode válido, o tamanho vem sempre do bloco.
+        let mut remaining = match channel.transfer_size() {
+            Some(size) => size,
+            None => {
+                let block_size = channel.block_control & 0xFFFF;
+                if block_size == 0 {
+                    0x1_0000
+                } else {
+                    block_size
+                }
+            }
+        };
+
+        while remaining > 0 {
+            let masked = address & 0x001F_FFFC;
+            // Cada entrada aponta para a anterior; a última é o marcador de fim.
+            let word = if remaining == 1 {
+                0x00FF_FFFF
+            } else {
+                masked.wrapping_sub(4) & 0x001F_FFFF
+            };
+            self.ram.write32(masked, word);
+            address = address.wrapping_sub(4);
+            remaining -= 1;
         }
     }
 

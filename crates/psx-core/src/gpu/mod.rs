@@ -441,6 +441,17 @@ impl Gpu {
         }
         let (x, y) = self.transfer.next_position();
         self.transfer.progress += 1;
+
+        // A transferência CPU→VRAM obedece à máscara de `GP0(0xE6)` como
+        // qualquer desenho: o `GP0(0x02)` (fill) é que a ignora.
+        if self.draw.check_mask_bit && self.vram.get(x, y) & 0x8000 != 0 {
+            return;
+        }
+        let value = if self.draw.force_mask_bit {
+            value | 0x8000
+        } else {
+            value
+        };
         self.vram.set(x, y, value);
     }
 
@@ -501,8 +512,16 @@ impl Gpu {
         self.rectangle_texture_y_flip = word & (1 << 13) != 0;
         self.draw.texture_disable = self.texture_disable_allowed && word & (1 << 11) != 0;
 
-        // Bits 0..10 e 15 de GPUSTAT são um espelho direto deste comando.
-        self.texpage_status_bits = (word & 0x07FF) | ((word & (1 << 11)) << 4);
+        // Bits 0..10 de GPUSTAT espelham o comando. O bit 15 só acompanha o
+        // bit 11 quando `GP1(0x09)` permitiu desabilitar textura; sem isso o
+        // hardware simplesmente ignora o pedido, e refleti-lo mesmo assim faz
+        // o software concluir que a textura está desligada quando não está.
+        let disable = if self.texture_disable_allowed {
+            (word & (1 << 11)) << 4
+        } else {
+            0
+        };
+        self.texpage_status_bits = (word & 0x07FF) | disable;
     }
 
     fn set_texture_window(&mut self, word: u32) {
@@ -612,7 +631,18 @@ impl Gpu {
         self.draw.texpage_y = (((texpage >> 4) & 1) * 256) as i32;
         self.draw.transparency = TransparencyMode::from_bits((texpage >> 5) & 3);
         self.draw.texture_depth = TextureDepth::from_bits((texpage >> 7) & 3);
-        self.texpage_status_bits = (self.texpage_status_bits & !0x01FF) | (texpage & 0x01FF);
+        self.draw.texture_disable = self.texture_disable_allowed && texpage & (1 << 11) != 0;
+
+        // O texpage embutido num polígono mexe em GPUSTAT igual ao `GP0(0xE1)`,
+        // inclusive no bit 15 — e também só quando a desabilitação de textura
+        // foi permitida.
+        let disable = if self.texture_disable_allowed {
+            (texpage & (1 << 11)) << 4
+        } else {
+            0
+        };
+        self.texpage_status_bits =
+            (self.texpage_status_bits & !0x81FF) | (texpage & 0x01FF) | disable;
     }
 
     fn draw_rect_command(&mut self) {

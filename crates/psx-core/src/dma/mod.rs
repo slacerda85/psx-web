@@ -165,11 +165,27 @@ impl Channel {
         self.control &= !(1 << 28);
     }
 
-    /// Máscara de bits graváveis de `CHCR`.
-    pub fn write_control(&mut self, value: u32) {
-        self.control = value & 0x7177_0703;
+    /// Escreve `CHCR` mantendo só os bits que o canal implementa.
+    ///
+    /// `hardwired` são bits que o silício mantém em 1 independentemente do que
+    /// o software escreve.
+    pub fn write_control(&mut self, value: u32, writable: u32, hardwired: u32) {
+        self.control = (value & writable) | hardwired;
     }
 }
+
+/// Bits graváveis de `CHCR` num canal comum.
+const CHCR_WRITABLE: u32 = 0x7177_0703;
+
+/// Bits graváveis de `CHCR` no canal 6 (OTC).
+///
+/// O canal da ordering table é cabeado: o sync mode fica preso em manual e o
+/// passo em "para trás". Guardar o que o software escreve nesses campos faria
+/// o canal obedecer a uma configuração que o silício ignora.
+const OTC_CHCR_WRITABLE: u32 = 0x5100_0000;
+
+/// Bits de `CHCR` presos em 1 no canal 6: o passo é sempre "para trás".
+const OTC_CHCR_HARDWIRED: u32 = 0x0000_0002;
 
 /// Estado do bloco `DICR`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -315,7 +331,14 @@ impl Dma {
                     // MADR guarda apenas endereços de RAM alinhados.
                     0x00 => self.channels[index].base = value & 0x00FF_FFFC,
                     0x04 => self.channels[index].block_control = value,
-                    0x08 => self.channels[index].write_control(value),
+                    0x08 => {
+                        let (writable, hardwired) = if port == Port::Otc {
+                            (OTC_CHCR_WRITABLE, OTC_CHCR_HARDWIRED)
+                        } else {
+                            (CHCR_WRITABLE, 0)
+                        };
+                        self.channels[index].write_control(value, writable, hardwired)
+                    }
                     _ => {}
                 }
                 if self.channels[index].is_active() && self.is_enabled(port) {
@@ -341,16 +364,16 @@ mod tests {
     #[test]
     fn manual_channel_needs_both_enable_and_trigger() {
         let mut channel = Channel::default();
-        channel.write_control(1 << 24);
+        channel.write_control(1 << 24, CHCR_WRITABLE, 0);
         assert!(!channel.is_active(), "só enable não basta no modo manual");
-        channel.write_control((1 << 24) | (1 << 28));
+        channel.write_control((1 << 24) | (1 << 28), CHCR_WRITABLE, 0);
         assert!(channel.is_active());
     }
 
     #[test]
     fn request_channel_only_needs_enable() {
         let mut channel = Channel::default();
-        channel.write_control((1 << 24) | (1 << 9));
+        channel.write_control((1 << 24) | (1 << 9), CHCR_WRITABLE, 0);
         assert_eq!(channel.sync(), Sync::Request);
         assert!(channel.is_active());
     }
@@ -358,7 +381,7 @@ mod tests {
     #[test]
     fn block_size_zero_means_65536_words() {
         let mut channel = Channel::default();
-        channel.write_control(1 << 24);
+        channel.write_control(1 << 24, CHCR_WRITABLE, 0);
         channel.block_control = 0;
         assert_eq!(channel.transfer_size(), Some(0x1_0000));
     }
@@ -366,7 +389,7 @@ mod tests {
     #[test]
     fn request_mode_multiplies_block_size_by_count() {
         let mut channel = Channel::default();
-        channel.write_control((1 << 24) | (1 << 9));
+        channel.write_control((1 << 24) | (1 << 9), CHCR_WRITABLE, 0);
         channel.block_control = (4 << 16) | 16;
         assert_eq!(channel.transfer_size(), Some(64));
     }
@@ -374,7 +397,7 @@ mod tests {
     #[test]
     fn linked_list_size_is_unknown_upfront() {
         let mut channel = Channel::default();
-        channel.write_control((1 << 24) | (2 << 9));
+        channel.write_control((1 << 24) | (2 << 9), CHCR_WRITABLE, 0);
         assert_eq!(channel.sync(), Sync::LinkedList);
         assert_eq!(channel.transfer_size(), None);
     }
@@ -382,7 +405,7 @@ mod tests {
     #[test]
     fn backward_step_subtracts_four() {
         let mut channel = Channel::default();
-        channel.write_control(2);
+        channel.write_control(2, CHCR_WRITABLE, 0);
         assert_eq!(channel.step(), Step::Backward);
         assert_eq!(0x1000u32.wrapping_add(channel.step().delta()), 0x0FFC);
     }
@@ -451,7 +474,7 @@ mod tests {
     #[test]
     fn finish_clears_the_busy_bits() {
         let mut channel = Channel::default();
-        channel.write_control((1 << 24) | (1 << 28));
+        channel.write_control((1 << 24) | (1 << 28), CHCR_WRITABLE, 0);
         channel.finish();
         assert!(!channel.is_active());
         assert_eq!(channel.control & (1 << 24), 0);
