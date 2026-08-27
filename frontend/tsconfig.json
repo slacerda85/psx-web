@@ -26,8 +26,10 @@
   "include": [
     "src",
     "e2e",
+    "e2e-local",
     "vite.config.ts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+    "playwright.local.config.ts"
   ],
   "exclude": [
     "src/wasm"

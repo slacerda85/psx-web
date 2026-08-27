@@ -3,3 +3,4 @@ dist/
 src/wasm/
 playwright-report/
 test-results/
+e2e-local/test-results/
