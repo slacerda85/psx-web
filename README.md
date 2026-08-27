@@ -14,14 +14,14 @@ TypeScript sem framework, com WebGL2 para vídeo e `AudioWorklet` para som.
 | --- | --- |
 | CPU R3000A + COP0 | Interpretador MIPS I completo, exceções e delay slots |
 | Bus / mirrors / DMA / Timers / IRQ | Implementados |
-| GTE (COP2) | Banco de registradores e flags completos; **nenhum comando implementado** |
+| GTE (COP2) | 22 comandos, aritmética de 44 bits, flags de saturação e a divisão UNR |
 | GPU | VRAM 1024×512, rasterizador por software, GP0/GP1, GPUSTAT |
 | SPU | Registradores, SPU RAM, DMA e geração de amostras; **mixagem das 24 vozes pendente** |
 | CD-ROM | Leitura de ISO, BIN cru e BIN/CUE; seek, leitura contínua 1x/2x, TOC e DMA |
 | SIO0 | Controller digital completo; **DualShock e memory card pendentes** |
 | Frontend | Vídeo, áudio, entrada, drag-and-drop, remapeamento e persistência |
 
-Cobertura atual: **194 testes** no core (191 unitários + 3 de integração contra
+Cobertura atual: **230 testes** no core (227 unitários + 3 de integração contra
 uma BIOS real) e **10 testes E2E** no frontend.
 
 O painel *Diagnóstico* da interface mostra contadores de funcionalidade não

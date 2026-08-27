@@ -9,7 +9,7 @@ dos agentes, está em [plano-emulador-psx-web.md](plano-emulador-psx-web.md).
 `wasm-bindgen`. Ele recebe bytes, executa ciclos e devolve buffers. Quem lida
 com arquivos, telas e alto-falantes é o embedder.
 
-Isso não é purismo: é o que permite rodar 191 testes de emulação em poucos milissegundos com
+Isso não é purismo: é o que permite rodar 227 testes de emulação em poucos milissegundos com
 `cargo test`, sem navegador, sem headless browser e sem harness. Um bug de
 GTE é reproduzido num teste unitário de dez linhas, não num jogo travando.
 
@@ -164,10 +164,6 @@ deixar o emulador falhar em silêncio:
 
 - **SPU** — os registradores, a RAM e o DMA funcionam, mas as 24 vozes ainda
   não são mixadas: não há ADPCM, ADSR nem reverb.
-- **GTE** — o banco de registradores, os espelhos e as flags estão completos,
-  mas `Gte::execute` ainda não implementa **nenhum** dos comandos: ele conta o
-  opcode e devolve os ciclos. É o que impede um jogo 3D de desenhar qualquer
-  coisa, mesmo carregando e executando normalmente.
 - **CD-ROM** — lê ISO, BIN cru e BIN/CUE. Falta CD-DA (faixas de áudio) e
   XA-ADPCM; CHD não é suportado.
 - **SIO0** — o controller digital está completo; DualShock (modo analógico,
