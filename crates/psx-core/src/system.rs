@@ -26,6 +26,9 @@ pub const VIDEO_HEIGHT_MAX: usize = FRAME_HEIGHT_MAX;
 /// injetado, com o kernel já inicializado.
 pub const SHELL_ENTRY_POINT: u32 = 0x8003_0000;
 
+/// Granularidade com que o SIO0 é acertado dentro de uma scanline.
+const SIO_STEP_CYCLES: u32 = 128;
+
 /// Resumo do que aconteceu num frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameStats {
@@ -42,6 +45,8 @@ pub struct System {
     region: Region,
     /// Sobra de ciclos de uma scanline para a próxima.
     cycle_debt: i64,
+    /// Texto emitido pelo programa via `putchar` do kernel.
+    tty: String,
 }
 
 impl System {
@@ -56,6 +61,7 @@ impl System {
             bus: Bus::new(bios),
             region,
             cycle_debt: 0,
+            tty: String::new(),
         }
     }
 
@@ -71,6 +77,7 @@ impl System {
             self.bus.cdrom.insert_disc(disc);
         }
         self.cycle_debt = 0;
+        self.tty.clear();
     }
 
     pub const fn region(&self) -> Region {
@@ -124,12 +131,27 @@ impl System {
 
         let mut spent = 0u64;
         let mut instructions = 0u64;
+        let mut since_sio = 0u32;
 
         while self.cycle_debt > 0 {
+            self.capture_tty();
             let cycles = self.cpu.step(&mut self.bus);
             self.cycle_debt -= cycles as i64;
             spent += cycles as u64;
             instructions += 1;
+
+            // O SIO0 precisa de resolução bem menor que uma scanline: o
+            // `/ACK` do controller chega ~338 ciclos depois do byte, e o BIOS
+            // desiste antes disso. Acertá-lo só no fim da linha (~2145 ciclos)
+            // faria todo controller parecer ausente.
+            since_sio += cycles;
+            if since_sio >= SIO_STEP_CYCLES {
+                self.bus.sio.step(since_sio, &mut self.bus.irq);
+                since_sio = 0;
+            }
+        }
+        if since_sio > 0 {
+            self.bus.sio.step(since_sio, &mut self.bus.irq);
         }
 
         // Os periféricos avançam em bloco no fim da scanline. Isso é grosso o
@@ -170,6 +192,41 @@ impl System {
             }
         }
         false
+    }
+
+    /// Intercepta as chamadas de `putchar` do kernel para capturar a TTY.
+    ///
+    /// O BIOS expõe as funções por três tabelas — `0xA0`, `0xB0` e `0xC0` —
+    /// entrando sempre pelo mesmo endereço, com o número da função em `$t1`.
+    /// Um console retail manda essa saída para a porta serial, que num PSX sem
+    /// expansão não vai a lugar nenhum; interceptá-la aqui é o que torna
+    /// legível o resultado de uma suíte de testes de hardware, que reporta
+    /// tudo por texto.
+    fn capture_tty(&mut self) {
+        let function = self.cpu.reg(9) & 0xFF;
+        let is_putchar = match self.cpu.pc() {
+            0xA0 => function == 0x3C,
+            0xB0 => function == 0x3D,
+            _ => return,
+        };
+        if !is_putchar {
+            return;
+        }
+        let byte = self.cpu.reg(4) as u8;
+        // Ignora o NUL final que algumas rotinas emitem.
+        if byte != 0 {
+            self.tty.push(byte as char);
+        }
+    }
+
+    /// Texto emitido pelo programa via `putchar` desde a última coleta.
+    pub fn take_tty(&mut self) -> String {
+        std::mem::take(&mut self.tty)
+    }
+
+    /// Texto acumulado, sem esvaziar o buffer.
+    pub fn tty(&self) -> &str {
+        &self.tty
     }
 
     /// Insere uma imagem de disco (ISO ou BIN de faixa única).

@@ -17,6 +17,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use psx_core::sio::ButtonState;
 use psx_core::{Bios, System};
 
 struct Options {
@@ -26,6 +27,8 @@ struct Options {
     output: String,
     /// Grava a VRAM inteira (1024x512) em vez da janela de display.
     vram: bool,
+    /// Botão mantido pressionado durante a segunda metade da execução.
+    press: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,12 +48,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    for _ in 0..options.frames {
+    // Um botão segurado na segunda metade da execução: é o que mostra se o
+    // console reage à entrada, separando "o core ignora os botões" de "o
+    // navegador não entrega as teclas".
+    let held = match options.press.as_deref() {
+        None => 0u16,
+        Some(name) => 1 << button_bit(name)?,
+    };
+
+    for frame in 0..options.frames {
+        if held != 0 && frame >= options.frames / 2 {
+            system.set_buttons(0, ButtonState::from_pressed_mask(held));
+        }
         system.run_frame();
     }
 
     // A VRAM inteira separa dois diagnósticos que a janela de display confunde:
     // "a GPU não desenhou nada" e "desenhou fora da área que está sendo exibida".
+    println!(
+        "irq     : I_MASK={:#06X} I_STAT={:#06X}",
+        system.bus().irq.mask(),
+        system.bus().irq.stat()
+    );
+    println!("sio     : {}", system.bus().sio.debug_state());
     println!("display : {:?}", system.bus().gpu.display_state());
     let vram = system.bus().gpu.vram().as_slice();
     let vram_used = vram.iter().filter(|&&pixel| pixel != 0).count();
@@ -117,6 +137,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Número do bit de um botão, na ordem do protocolo SIO0.
+fn button_bit(name: &str) -> Result<u16, Box<dyn std::error::Error>> {
+    let bit = match name.to_ascii_lowercase().as_str() {
+        "select" => 0,
+        "l3" => 1,
+        "r3" => 2,
+        "start" => 3,
+        "up" => 4,
+        "right" => 5,
+        "down" => 6,
+        "left" => 7,
+        "l2" => 8,
+        "r2" => 9,
+        "l1" => 10,
+        "r1" => 11,
+        "triangle" => 12,
+        "circle" => 13,
+        "cross" => 14,
+        "square" => 15,
+        other => return Err(format!("botão desconhecido: {other}").into()),
+    };
+    Ok(bit)
+}
+
 fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     let mut options = Options {
         bios: "bios/SCPH1001.BIN".into(),
@@ -124,6 +168,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         frames: 300,
         output: "screenshot.bmp".into(),
         vram: false,
+        press: None,
     };
 
     let mut args = std::env::args().skip(1);
@@ -138,6 +183,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
             "--frames" => options.frames = value()?.parse()?,
             "--out" => options.output = value()?,
             "--vram" => options.vram = true,
+            "--press" => options.press = Some(value()?),
             other => return Err(format!("opção desconhecida: {other}").into()),
         }
     }
