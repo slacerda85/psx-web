@@ -1,0 +1,18 @@
+[package]
+name = "psx-core"
+description = "Core de emulação do PlayStation 1 (R3000A, GTE, GPU, SPU, CD-ROM)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Nenhuma. O core é lógica pura e não conhece nem o navegador nem o sistema
+# de arquivos — quem entrega bytes é o embedder (psx-wasm ou os testes).
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
