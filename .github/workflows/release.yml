@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gerar as notas a partir dos Conventional Commits
+        id: notes
+        run: |
+          previous=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo '')
+          range=${previous:+$previous..}${GITHUB_REF_NAME}
+          {
+            echo 'body<<CHANGELOG'
+            for section in "feat:Funcionalidades" "fix:Correções" "perf:Performance" "docs:Documentação"; do
+              type=${section%%:*}
+              title=${section##*:}
+              entries=$(git log --format='- %s (%h)' --grep="^${type}(\|^${type}:" "$range" || true)
+              if [ -n "$entries" ]; then
+                printf '### %s\n%s\n\n' "$title" "$entries"
+              fi
+            done
+            echo CHANGELOG
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.body }}
+          generate_release_notes: true
