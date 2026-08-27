@@ -131,3 +131,38 @@ test('remapear uma tecla persiste a nova ligacao', async ({ page }) => {
     page.locator('#keys-list li').filter({ hasText: 'Cross' }).locator('button'),
   ).toHaveText('M');
 });
+
+test('uma imagem ISO e aceita e o chip de disco acende', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#version')).toHaveText(/psx-core/);
+  await upload(page, '#pick-bios', 'scph1001.bin', BIOS_SIZE);
+  await expect(page.locator('#chip-bios')).toHaveAttribute('data-state', 'on');
+
+  // 32 setores de 2048 B: o menor ISO que o core reconhece como imagem.
+  await upload(page, '#pick-disc', 'jogo.iso', 2048 * 32);
+
+  await expect(page.locator('#chip-disc')).toHaveAttribute('data-state', 'on');
+  await expect(page.locator('#toast')).toContainText('32 setores');
+});
+
+test('uma imagem com tamanho invalido e recusada com o motivo', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#version')).toHaveText(/psx-core/);
+  await upload(page, '#pick-bios', 'scph1001.bin', BIOS_SIZE);
+
+  // 1000 bytes nao e multiplo de 2048 nem de 2352.
+  await upload(page, '#pick-disc', 'quebrado.iso', 1000);
+
+  await expect(page.locator('#toast')).toContainText('não é múltiplo');
+  await expect(page.locator('#chip-disc')).toHaveAttribute('data-state', 'off');
+});
+
+test('inserir um disco sem BIOS avisa em vez de falhar em silencio', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#version')).toHaveText(/psx-core/);
+
+  await upload(page, '#pick-disc', 'jogo.iso', 2048 * 32);
+
+  await expect(page.locator('#toast')).toContainText('Carregue uma BIOS');
+  await expect(page.locator('#chip-disc')).toHaveAttribute('data-state', 'off');
+});

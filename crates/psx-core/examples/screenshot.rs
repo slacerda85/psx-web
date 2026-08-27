@@ -1,4 +1,4 @@
-//! Ferramenta de depuração visual: roda a BIOS por N frames e grava o
+//! Ferramenta de depuração visual: roda o console por N frames e grava o
 //! framebuffer em BMP.
 //!
 //! Ver o que a GPU produziu é a forma mais rápida de diagnosticar o
@@ -6,28 +6,44 @@
 //! certos, mas não que a tela inteira faz sentido.
 //!
 //! ```sh
-//! cargo run -p psx-core --example screenshot -- bios/SCPH1001.BIN 300 boot.bmp
+//! cargo run -p psx-core --example screenshot -- --bios bios/SCPH1001.BIN --frames 300
+//! cargo run -p psx-core --example screenshot -- --bios bios/SCPH1001.BIN \
+//!     --disc games/xenogears/xenogears-disk-1.cue --frames 1800 --out xeno.bmp
 //! ```
 //!
 //! BMP é escrito à mão de propósito: o core não tem dependências e não vai
 //! ganhar uma só para salvar imagem de debug.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use psx_core::{Bios, System};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    let bios_path = args.next().unwrap_or_else(|| "bios/SCPH1001.BIN".into());
-    let frames: u32 = args.next().unwrap_or_else(|| "300".into()).parse()?;
-    let output = args.next().unwrap_or_else(|| "screenshot.bmp".into());
+struct Options {
+    bios: String,
+    disc: Option<String>,
+    frames: u32,
+    output: String,
+}
 
-    let bytes = std::fs::read(&bios_path)
-        .map_err(|error| format!("não consegui ler {bios_path}: {error}"))?;
-    let bios = Bios::new(bytes)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_args()?;
+
+    let bios = Bios::new(std::fs::read(&options.bios)?)?;
     let mut system = System::new(bios);
 
-    for _ in 0..frames {
+    if let Some(path) = &options.disc {
+        load_disc(&mut system, Path::new(path))?;
+        let disc = system.disc().expect("acabou de ser inserido");
+        println!(
+            "disco   : {:?}, {} setores, {} faixa(s)",
+            disc.region(),
+            disc.total_sectors(),
+            disc.tracks().len()
+        );
+    }
+
+    for _ in 0..options.frames {
         system.run_frame();
     }
 
@@ -39,14 +55,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = (width * height) as u64;
     let diagnostics = system.diagnostics();
 
-    println!("frames executados : {frames}");
-    println!("resolução         : {width}x{height}");
+    println!("frames  : {}", options.frames);
+    println!("resolução: {width}x{height}");
     println!(
-        "pixels não-pretos : {non_black} de {total} ({:.1}%)",
+        "desenhado: {non_black} de {total} pixels ({:.1}%)",
         non_black as f64 / total as f64 * 100.0
     );
     println!(
-        "diagnóstico       : gte={} gpu={} cdrom={} leituras={} escritas={}",
+        "diagnóstico: gte={} gpu={} cdrom={} leituras={} escritas={}",
         diagnostics.gte_unimplemented,
         diagnostics.gpu_unhandled,
         diagnostics.cdrom_unimplemented,
@@ -54,9 +70,96 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diagnostics.bus_unhandled_writes,
     );
 
-    write_bmp(&output, pixels, width, height)?;
-    println!("gravado           : {output}");
+    if diagnostics.cdrom_unimplemented > 0 {
+        println!(
+            "cdrom   : último comando sem implementação = {:#04X}",
+            system.bus().cdrom.last_unimplemented_command()
+        );
+    }
+    if diagnostics.gte_unimplemented > 0 {
+        println!(
+            "gte     : último comando sem implementação = {:#04X}",
+            system.cpu().gte.last_unimplemented_command()
+        );
+    }
+
+    write_bmp(&options.output, pixels, width, height)?;
+    println!("gravado : {}", options.output);
     Ok(())
+}
+
+fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
+    let mut options = Options {
+        bios: "bios/SCPH1001.BIN".into(),
+        disc: None,
+        frames: 300,
+        output: "screenshot.bmp".into(),
+    };
+
+    let mut args = std::env::args().skip(1);
+    while let Some(flag) = args.next() {
+        let mut value = || {
+            args.next()
+                .ok_or_else(|| format!("{flag} precisa de um valor"))
+        };
+        match flag.as_str() {
+            "--bios" => options.bios = value()?,
+            "--disc" => options.disc = Some(value()?),
+            "--frames" => options.frames = value()?.parse()?,
+            "--out" => options.output = value()?,
+            other => return Err(format!("opção desconhecida: {other}").into()),
+        }
+    }
+    Ok(options)
+}
+
+/// Insere um disco, aceitando tanto `.cue` quanto imagem crua.
+fn load_disc(system: &mut System, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+    {
+        let cue = std::fs::read_to_string(path)?;
+        let binary = locate_binary(path, &cue)?;
+        system.load_disc_with_cue(&cue, std::fs::read(binary)?)?;
+    } else {
+        system.load_disc(std::fs::read(path)?)?;
+    }
+    Ok(())
+}
+
+/// Acha o binário de um CUE, tolerando que ele tenha sido renomeado.
+fn locate_binary(cue_path: &Path, cue: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let directory = cue_path.parent().unwrap_or(Path::new("."));
+
+    if let Some(declared) = cue
+        .lines()
+        .find(|line| line.trim_start().to_ascii_uppercase().starts_with("FILE"))
+        .and_then(|line| line.split('"').nth(1))
+    {
+        let candidate = directory.join(declared);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    // Um .bin de jogo é sempre o maior arquivo da pasta.
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && !path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
+        })
+        .collect();
+    candidates.sort_by_key(|path| std::cmp::Reverse(path.metadata().map(|m| m.len()).unwrap_or(0)));
+
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("nenhum binário ao lado de {}", cue_path.display()).into())
 }
 
 fn count_non_black(pixels: &[u8], width: u32, height: u32) -> u64 {
