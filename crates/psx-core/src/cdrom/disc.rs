@@ -438,6 +438,24 @@ impl Disc {
             .get(offset..offset + (SECTOR_RAW - SYNC_PATTERN.len()))
     }
 
+    /// O subheader de um setor Mode 2: arquivo, canal, submodo e codificação.
+    ///
+    /// É o que distingue um setor de dados de um de áudio XA. Só existe em
+    /// imagens cruas de Mode 2 — num ISO de 2048 bytes não há subheader, e
+    /// todo setor é de dados.
+    pub fn subheader(&self, lba: u32) -> Option<[u8; 4]> {
+        let track = self.track_for(lba)?;
+        if track.sector_size != SECTOR_RAW {
+            return None;
+        }
+        let offset = self.byte_offset(track, lba);
+        let sector = self.image.get(offset..offset + SECTOR_RAW)?;
+        if sector[MODE_BYTE_OFFSET] != 2 {
+            return None;
+        }
+        Some([sector[16], sector[17], sector[18], sector[19]])
+    }
+
     fn byte_offset(&self, track: &Track, lba: u32) -> usize {
         (track.file_offset + (lba - track.start_lba) as u64 * track.sector_size as u64) as usize
     }

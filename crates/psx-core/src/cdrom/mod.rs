@@ -56,10 +56,24 @@ pub mod status {
 
 /// Bits do registrador de modo, escrito por `Setmode`.
 mod mode {
+    /// Só entrega setores cujo arquivo e canal casam com o `Setfilter`.
+    pub const XA_FILTER: u8 = 1 << 3;
     /// Entrega o setor inteiro (2340 B) em vez dos 2048 B de usuário.
     pub const WHOLE_SECTOR: u8 = 1 << 5;
+    /// Manda os setores de áudio XA para o SPU em vez de para o CPU.
+    pub const XA_ADPCM: u8 = 1 << 6;
     /// Velocidade dupla (2x).
     pub const DOUBLE_SPEED: u8 = 1 << 7;
+}
+
+/// Bits do submodo, no terceiro byte do subheader de um setor Mode 2.
+mod submode {
+    /// O setor carrega áudio ADPCM.
+    pub const AUDIO: u8 = 1 << 2;
+    /// Form 2: 2324 bytes de carga e sem correção de erro.
+    pub const FORM2: u8 = 1 << 5;
+    /// Tempo real: o drive entrega no compasso, sem reler em caso de erro.
+    pub const REAL_TIME: u8 = 1 << 6;
 }
 
 /// Uma resposta agendada, entregue depois de `delay` ciclos.
@@ -97,6 +111,9 @@ pub struct CdRom {
 
     disc: Option<Disc>,
 
+    /// Arquivo e canal selecionados por `Setfilter`, para os setores XA.
+    filter_file: u8,
+    filter_channel: u8,
     /// Alvo do próximo seek, escrito por `Setloc`.
     seek_target: Msf,
     /// Posição corrente da cabeça.
@@ -180,6 +197,8 @@ impl CdRom {
             status: status::SHELL_OPEN,
             mode: 0,
             disc: None,
+            filter_file: 0,
+            filter_channel: 0,
             seek_target: Msf::default(),
             position: Msf::default(),
             read_lba: 0,
@@ -292,6 +311,34 @@ impl CdRom {
         }
     }
 
+    /// O setor em `lba` é áudio XA que o drive toca sozinho?
+    ///
+    /// Só quando o `Setmode` pediu ADPCM e o subheader marca áudio em tempo
+    /// real. Com o filtro ligado, arquivo e canal também precisam casar com o
+    /// que o `Setfilter` selecionou — é assim que um jogo escolhe uma trilha
+    /// entre as várias intercaladas no mesmo arquivo.
+    fn is_adpcm_sector(&self, lba: u32) -> bool {
+        if self.mode & mode::XA_ADPCM == 0 {
+            return false;
+        }
+        let Some([file, channel, flags, _]) =
+            self.disc.as_ref().and_then(|disc| disc.subheader(lba))
+        else {
+            return false;
+        };
+        const AUDIO_SECTOR: u8 = submode::AUDIO | submode::FORM2 | submode::REAL_TIME;
+        if flags & AUDIO_SECTOR != AUDIO_SECTOR {
+            return false;
+        }
+        if self.mode & mode::XA_FILTER != 0
+            && (file != self.filter_file || channel != self.filter_channel)
+        {
+            // Fora do filtro: o setor é descartado, nem tocado nem entregue.
+            return true;
+        }
+        true
+    }
+
     /// Produz o próximo setor quando o drive está lendo.
     fn advance_read(&mut self, cycles: u32) {
         if self.drive != Drive::Reading {
@@ -316,6 +363,17 @@ impl CdRom {
 
         let whole = self.mode & mode::WHOLE_SECTOR != 0;
         let lba = self.read_lba;
+
+        // Um setor de áudio XA não é entregue ao CPU: o drive o encaminha ao
+        // decodificador ADPCM, que toca o som sem passar pela CPU. Entregá-lo
+        // como se fosse dado enche o jogo de INT1 que ele não pediu — o
+        // Grandstream Saga recebe mais setores de áudio do que de dados e
+        // nunca sai da tela de carregamento.
+        if self.is_adpcm_sector(lba) {
+            self.position = Msf::from_lba(lba);
+            self.read_lba = lba.wrapping_add(1);
+            return;
+        }
         let sector = self.disc.as_ref().and_then(|disc| {
             if whole {
                 disc.read_whole_sector(lba)
@@ -583,10 +641,14 @@ impl CdRom {
                 }
             }
 
-            // Setfilter — seleciona o canal XA. Sem XA-ADPCM não há o que
-            // filtrar, mas recusar o comando faria o jogo desistir do áudio
-            // em vez de seguir sem ele.
-            0x0D => self.acknowledge(),
+            // Setfilter — escolhe o arquivo e o canal XA a aceitar.
+            0x0D => {
+                if let [file, channel, ..] = parameters[..] {
+                    self.filter_file = file;
+                    self.filter_channel = channel;
+                }
+                self.acknowledge();
+            }
 
             // Getparam — devolve modo e filtro correntes.
             0x0F => {
