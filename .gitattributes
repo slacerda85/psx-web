@@ -1,0 +1,7 @@
+# Normaliza quebras de linha: LF no repositório, nativo no working tree.
+# Sem isto, um checkout no Windows e outro no CI do Linux produzem diffs
+# inteiros de arquivo por causa de CRLF.
+* text=auto eol=lf
+
+*.png binary
+*.wasm binary
