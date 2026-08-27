@@ -10,6 +10,7 @@ use crate::cdrom::CdRom;
 use crate::dma::{Direction, Dma, Port, Sync};
 use crate::gpu::Gpu;
 use crate::irq::{Interrupt, IrqController};
+use crate::mdec::Mdec;
 use crate::memory::{self, Ram, SCRATCHPAD_SIZE};
 use crate::sio::Sio;
 use crate::spu::Spu;
@@ -28,6 +29,7 @@ pub struct Bus {
     pub spu: Spu,
     pub cdrom: CdRom,
     pub sio: Sio,
+    pub mdec: Mdec,
 
     /// `0x1F80_1000..0x1F80_1024` — mapeamento das expansões. O BIOS escreve
     /// valores fixos aqui e nunca mais mexe.
@@ -56,6 +58,7 @@ impl Bus {
             spu: Spu::new(),
             cdrom: CdRom::new(),
             sio: Sio::new(),
+            mdec: Mdec::new(),
             memory_control: [0; 9],
             ram_size: 0x0000_0B88,
             cache_control: 0,
@@ -282,10 +285,8 @@ impl Bus {
             0x800..=0x803 => self.cdrom.read(offset - 0x800) as u32,
             0x810 => self.gpu.read(),
             0x814 => self.gpu.status(),
-            // MDEC: o agente de vídeo ainda não existe; status "pronto e
-            // ocioso" evita travar quem só consulta.
-            0x820 => 0,
-            0x824 => 0x8000_0000,
+            0x820 => self.mdec.read_data(),
+            0x824 => self.mdec.status(),
             0xC00..=0xFFF => {
                 let low = self.spu.read(offset - 0xC00) as u32;
                 let high = self.spu.read(offset - 0xC00 + 2) as u32;
@@ -334,8 +335,8 @@ impl Bus {
             0x800..=0x803 => self.cdrom.write(offset - 0x800, value as u8),
             0x810 => self.gpu.write_gp0(value, &mut self.irq),
             0x814 => self.gpu.write_gp1(value),
-            // MDEC: comandos ainda não modelados.
-            0x820 | 0x824 => {}
+            0x820 => self.mdec.write_command(value),
+            0x824 => self.mdec.write_control(value),
             0xC00..=0xFFF => {
                 self.spu.write(offset - 0xC00, value as u16);
                 self.spu.write(offset - 0xC00 + 2, (value >> 16) as u16);
@@ -441,6 +442,7 @@ impl Bus {
                     match port {
                         Port::Gpu => self.gpu.write_gp0(word, &mut self.irq),
                         Port::Spu => self.spu.dma_write(word),
+                        Port::MdecIn => self.mdec.dma_write(word),
                         _ => {}
                     }
                 }
@@ -459,6 +461,7 @@ impl Bus {
                         Port::Gpu => self.gpu.read(),
                         Port::Spu => self.spu.dma_read(),
                         Port::CdRom => self.cdrom.dma_read(),
+                        Port::MdecOut => self.mdec.dma_read(),
                         _ => 0,
                     };
                     self.ram.write32(masked, word);

@@ -32,8 +32,19 @@ serão resolvidos juntos, quando houver um scheduler que intercale DMA e CPU.
 
 | Teste | Falta |
 | --- | --- |
-| `mdec/4bit`, `mdec/8bit`, `mdec/step-by-step-log` | MDEC inteiro |
+| `mdec/4bit`, `mdec/8bit`, `mdec/step-by-step-log` | O MDEC existe e decodifica; ver abaixo |
 | `spu/memory-transfer` | Caminho de transferência da SPU RAM |
+
+## MDEC — decodifica, mas o transporte diverge
+
+O decodificador está implementado: RLE, dequantização, IDCT e conversão
+YUV→RGB. Os valores conferem — onde o console produz o pixel  e depois
+, o nosso IDCT dá  e , que saturam exatamente nesses dois.
+
+O que falha é o DMA de saída. O teste configura o canal 1 com (tamanho de bloco 0x20, contagem **zero**), então nada é transferido; no
+console o mesmo teste usa tamanho de bloco 0x8 e contagem 1. O teste deriva
+esse tamanho de algo que reportamos diferente do hardware — provavelmente um
+campo do registrador de status — e é aí que a investigação deve continuar.
 
 ## Bugs a investigar
 

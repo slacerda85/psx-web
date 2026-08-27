@@ -22,6 +22,7 @@ pub mod exe;
 pub mod gpu;
 pub mod gte;
 pub mod irq;
+pub mod mdec;
 pub mod memory;
 pub mod sio;
 pub mod spu;
