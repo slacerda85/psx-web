@@ -18,6 +18,21 @@ pub use vram::{bgr555_to_rgba8, Vram, VRAM_HEIGHT, VRAM_WIDTH};
 
 use crate::irq::{Interrupt, IrqController};
 
+/// Recorte do estado de display e de desenho, para diagnóstico.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayState {
+    pub disabled: bool,
+    pub vram_x: u32,
+    pub vram_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth_24: bool,
+    pub interlaced: bool,
+    /// `(left, top, right, bottom)` da área de desenho.
+    pub draw_area: (i32, i32, i32, i32),
+    pub draw_offset: (i32, i32),
+}
+
 /// Direção do DMA configurada por `GP1(0x04)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DmaDirection {
@@ -852,6 +867,29 @@ impl Gpu {
 
     /// Framebuffer RGBA8 do último frame. O comprimento útil é
     /// `frame_width * frame_height * 4`.
+    /// Estado da janela de display, para diagnóstico.
+    ///
+    /// Quando a VRAM tem conteúdo mas a tela está preta, a resposta está aqui:
+    /// ou o display está desligado, ou a janela aponta para outra região.
+    pub fn display_state(&self) -> DisplayState {
+        DisplayState {
+            disabled: self.display_disabled,
+            vram_x: self.display_vram_x,
+            vram_y: self.display_vram_y,
+            width: self.frame_width,
+            height: self.frame_height,
+            depth_24: self.display_depth_24,
+            interlaced: self.interlaced,
+            draw_area: (
+                self.draw.area_left,
+                self.draw.area_top,
+                self.draw.area_right,
+                self.draw.area_bottom,
+            ),
+            draw_offset: (self.draw.offset_x, self.draw.offset_y),
+        }
+    }
+
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer
     }

@@ -114,7 +114,13 @@ pub struct CdRom {
     data_requested: bool,
     /// Último setor lido, à espera de o CPU pedir os bytes.
     staged_sector: Vec<u8>,
+    /// Há um setor novo em `staged_sector` ainda não movido para a FIFO.
+    sector_available: bool,
 
+    /// Últimos comandos recebidos, para diagnóstico.
+    history: VecDeque<u8>,
+    /// Setores entregues desde o boot, para diagnóstico.
+    sectors_delivered: u64,
     /// Comandos recebidos sem implementação, para diagnóstico.
     unimplemented: u64,
     last_unimplemented: u8,
@@ -154,6 +160,9 @@ impl CdRom {
             sector_cursor: 0,
             data_requested: false,
             staged_sector: Vec::new(),
+            sector_available: false,
+            history: VecDeque::with_capacity(16),
+            sectors_delivered: 0,
             unimplemented: 0,
             last_unimplemented: 0,
         }
@@ -182,6 +191,34 @@ impl CdRom {
 
     pub const fn unimplemented_commands(&self) -> u64 {
         self.unimplemented
+    }
+
+    /// Retrato do estado interno, para diagnóstico.
+    ///
+    /// Quando um jogo trava esperando dados, a pergunta é sempre a mesma: o
+    /// drive ainda está lendo, e há resposta presa na fila sem acknowledge?
+    pub fn debug_state(&self) -> String {
+        format!(
+            "drive={:?} setores={} lba={} pendentes={} flags={:#04X} enable={:#04X} bfrd={} novo={} fifo={}/{} modo={:#04X}",
+            self.drive,
+            self.sectors_delivered,
+            self.read_lba,
+            self.pending.len(),
+            self.interrupt_flags,
+            self.interrupt_enable,
+            self.data_requested,
+            self.sector_available,
+            self.sector_cursor,
+            self.sector_buffer.len(),
+            self.mode,
+        ) + &format!(
+            " histórico=[{}]",
+            self.history
+                .iter()
+                .map(|command| format!("{command:#04X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     }
 
     pub const fn last_unimplemented_command(&self) -> u8 {
@@ -234,9 +271,14 @@ impl CdRom {
         if self.next_sector_in > 0 {
             return;
         }
-        // Uma resposta ainda na fila significa que o CPU está atrasado; segurar
-        // o setor evita perder o anterior antes de ele ser lido.
-        if !self.pending.is_empty() {
+        // Segura o setor enquanto o anterior não foi entregue **e** recolhido.
+        //
+        // Não basta olhar a fila de respostas: assim que uma INT1 é entregue
+        // ela sai da fila e vira `interrupt_flags`, e produzir o próximo setor
+        // nesse intervalo sobrescreveria o que o CPU ainda vai ler. O jogo
+        // perde um setor no meio de um arquivo, o checksum falha e ele relê o
+        // mesmo trecho para sempre — que é exatamente como o Xenogears travava.
+        if !self.pending.is_empty() || self.interrupt_flags != 0 {
             self.next_sector_in = 0;
             return;
         }
@@ -256,6 +298,8 @@ impl CdRom {
             Some(bytes) => {
                 self.staged_sector.clear();
                 self.staged_sector.extend_from_slice(bytes);
+                self.sector_available = true;
+                self.sectors_delivered += 1;
                 self.position = Msf::from_lba(lba);
                 self.read_lba = lba.wrapping_add(1);
                 let status = self.status;
@@ -372,11 +416,18 @@ impl CdRom {
     /// `0x1F80_1803.Index0` — o bit 7 (BFRD) move o setor para a FIFO.
     fn set_data_request(&mut self, value: u8) {
         if value & 0x80 != 0 {
-            // Repetir o pedido sem ter consumido o setor não o recarrega: o
-            // hardware só reenche a FIFO quando ela foi drenada.
-            if self.sector_cursor >= self.sector_buffer.len() {
+            // Cada INT1 disponibiliza **um** setor; o pedido move esse setor
+            // para a FIFO e rebobina o cursor.
+            //
+            // Condicionar a recarga a ter drenado a FIFO seria errado: em modo
+            // "setor inteiro" o CPU lê o header, o subheader e os 2048 bytes
+            // de dados e para, deixando os 280 bytes de ECC para trás. Com a
+            // recarga presa nesse resto, o setor seguinte nunca chegaria e o
+            // jogo esperaria para sempre por dados que já estavam prontos.
+            if self.sector_available {
                 std::mem::swap(&mut self.sector_buffer, &mut self.staged_sector);
                 self.sector_cursor = 0;
+                self.sector_available = false;
             }
             self.data_requested = true;
         } else {
@@ -408,6 +459,10 @@ impl CdRom {
 
     /// Executa um comando escrito em `0x1F80_1801.Index0`.
     fn execute(&mut self, command: u8) {
+        if self.history.len() == 16 {
+            self.history.pop_front();
+        }
+        self.history.push_back(command);
         let parameters: Vec<u8> = self.parameters.drain(..).collect();
 
         match command {
@@ -434,9 +489,11 @@ impl CdRom {
                 self.drive = Drive::Reading;
                 self.status |= status::READING;
                 self.status &= !status::SEEKING;
-                // O primeiro setor sai depois do seek; os seguintes na
-                // cadência do drive.
-                self.next_sector_in = SEEK_DELAY;
+                // O primeiro setor sai na mesma cadência dos seguintes, e não
+                // depois de um atraso de seek: quando o `Setloc` cai perto de
+                // onde a cabeça já está — o caso comum ao ler um arquivo em
+                // pedaços — o drive real não reposiciona nada.
+                self.next_sector_in = self.cycles_per_sector();
                 self.acknowledge();
             }
 
