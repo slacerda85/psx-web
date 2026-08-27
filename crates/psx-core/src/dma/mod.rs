@@ -328,6 +328,13 @@ impl Dma {
             }
             0x74 => {
                 self.interrupt.write(value);
+                // O acknowledge derruba o flag mestre, e o detector de borda
+                // precisa acompanhar. Sem isso ele continua achando que o nível
+                // ainda é 1: a transferência seguinte levanta o flag de novo,
+                // a transição 0→1 nunca é vista e a IRQ nunca chega. O jogo
+                // fica esperando um DMA que, para ele, jamais terminou —
+                // foi assim que o Xenogears travava depois de carregar.
+                self.previous_master_flag = self.interrupt.master_flag();
                 None
             }
             _ => {
