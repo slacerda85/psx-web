@@ -32,6 +32,8 @@ const IDLE_FRAMES: u32 = 90;
 struct Options {
     bios: String,
     tests: String,
+    /// Imagem de disco a inserir. Os testes de CD-ROM exigem uma.
+    disc: Option<String>,
     only: Option<String>,
     verbose: bool,
 }
@@ -67,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
 
-        let actual = run(&bios, &executable)?;
+        let actual = run(&bios, &executable, options.disc.as_deref())?;
 
         if contains_in_order(&normalise(&actual), &normalise(&expected)) {
             println!("  ok  {name}");
@@ -92,8 +94,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Executa um `.exe` de teste e devolve o que ele imprimiu.
-fn run(bios: &[u8], executable: &Path) -> Result<String, Box<dyn std::error::Error>> {
+fn run(
+    bios: &[u8],
+    executable: &Path,
+    disc: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
     let mut system = System::new(Bios::new(bios.to_vec())?);
+    // Os testes de CD-ROM param logo no começo pedindo um disco.
+    if let Some(path) = disc {
+        load_disc(&mut system, Path::new(path))?;
+    }
     // O kernel precisa estar de pé antes do sideload: os testes chamam funções
     // do BIOS para imprimir.
     system.run_until_shell(BOOT_BUDGET);
@@ -201,6 +211,7 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
     let mut options = Options {
         bios: "bios/SCPH1001.BIN".into(),
         tests: "ps1-tests".into(),
+        disc: None,
         only: None,
         verbose: false,
     };
@@ -213,10 +224,45 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         match flag.as_str() {
             "--bios" => options.bios = value()?,
             "--tests" => options.tests = value()?,
+            "--disc" => options.disc = Some(value()?),
             "--only" => options.only = Some(value()?),
             "--verbose" => options.verbose = true,
             other => return Err(format!("opção desconhecida: {other}").into()),
         }
     }
     Ok(options)
+}
+
+/// Insere um disco, aceitando `.cue` ou imagem crua.
+fn load_disc(system: &mut System, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
+    {
+        let cue = std::fs::read_to_string(path)?;
+        let directory = path.parent().unwrap_or(Path::new("."));
+        // O nome dentro da folha quase nunca sobrevive ao download: o binário
+        // é o maior arquivo ao lado dela.
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate.is_file()
+                    && !candidate
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| {
+            std::cmp::Reverse(candidate.metadata().map(|meta| meta.len()).unwrap_or(0))
+        });
+        let binary = candidates
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("nenhum binário ao lado de {}", path.display()))?;
+        system.load_disc_with_cue(&cue, std::fs::read(binary)?)?;
+    } else {
+        system.load_disc(std::fs::read(path)?)?;
+    }
+    Ok(())
 }

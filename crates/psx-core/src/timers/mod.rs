@@ -5,10 +5,9 @@
 //! Cada timer ocupa `0x1F80_1100 + n*0x10`:
 //! `+0` contador, `+4` modo, `+8` alvo. Todos são de 16 bits.
 //!
-//! **Escopo atual:** as fontes de clock derivadas do vídeo (dotclock e
-//! hblank) usam uma aproximação por proporção de ciclos de CPU. A modelagem
-//! exata depende do timing de scanline da GPU e é entrega do agente `@gpu`
-//! em conjunto com o `@cpu`.
+//! As fontes derivadas do vídeo (dotclock e hblank) usam a razão exata entre
+//! os clocks da GPU e da CPU (11/7). O divisor do dotclock depende da
+//! resolução horizontal corrente; hoje assumimos 320 px, que é a mais comum.
 
 use crate::irq::{Interrupt, IrqController};
 

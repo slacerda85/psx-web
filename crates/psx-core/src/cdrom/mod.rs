@@ -119,6 +119,12 @@ pub struct CdRom {
 
     /// Últimos comandos recebidos, para diagnóstico.
     history: VecDeque<u8>,
+    /// Já houve leitura de setor desde o último reset ou seek.
+    ///
+    /// `GetlocL` devolve o header do último setor lido; sem nenhum, o
+    /// hardware responde INT5 em vez de inventar uma posição.
+    header_valid: bool,
+
     /// Setores entregues desde o boot, para diagnóstico.
     sectors_delivered: u64,
     /// Comandos recebidos sem implementação, para diagnóstico.
@@ -126,8 +132,31 @@ pub struct CdRom {
     last_unimplemented: u8,
 }
 
-/// Latência típica de um acknowledge, em ciclos de CPU.
-const ACKNOWLEDGE_DELAY: i64 = 20_000;
+// Latências medidas num console real pelo `cdrom/timing` do ps1-tests.
+//
+// O drive é mecânico e as respostas variam bastante (o mesmo comando vai de
+// 24 mil a 180 mil ciclos), então usamos a média de cada uma. Os valores que
+// tínhamos antes eram de duas a dez vezes curtos demais, e um jogo que
+// sequencia comandos pelo tempo de resposta sai do compasso com isso.
+
+/// Acknowledge (INT3) de um comando comum.
+const ACKNOWLEDGE_DELAY: i64 = 50_000;
+
+/// `Pause` responde o acknowledge mais rápido que os demais...
+const PAUSE_ACK_DELAY: i64 = 28_600;
+
+/// ...e leva perto de um milhão de ciclos para concluir de fato.
+const PAUSE_COMPLETE_DELAY: i64 = 1_010_000;
+
+/// `Init`: acknowledge e conclusão.
+const INIT_ACK_DELAY: i64 = 75_000;
+const INIT_COMPLETE_DELAY: i64 = 476_000;
+
+/// Latência até o primeiro setor depois de `ReadN`, **além** do período.
+///
+/// O drive precisa alcançar a posição e sincronizar antes de entregar o
+/// primeiro setor; só a partir do segundo a cadência é a do período.
+const READ_START_DELAY: i64 = 280_000;
 
 /// Latência de um seek. Não é proporcional à distância: o BIOS e os jogos
 /// toleram folga aqui, e um valor fixo evita fingir uma precisão que não
@@ -162,6 +191,7 @@ impl CdRom {
             staged_sector: Vec::new(),
             sector_available: false,
             history: VecDeque::with_capacity(16),
+            header_valid: false,
             sectors_delivered: 0,
             unimplemented: 0,
             last_unimplemented: 0,
@@ -301,6 +331,10 @@ impl CdRom {
                 self.sector_available = true;
                 self.sectors_delivered += 1;
                 self.position = Msf::from_lba(lba);
+                self.header_valid = true;
+                // Chegou o primeiro setor: o posicionamento acabou.
+                self.status &= !status::SEEKING;
+                self.status |= status::READING;
                 self.read_lba = lba.wrapping_add(1);
                 let status = self.status;
                 self.schedule(CdInterrupt::DataReady, vec![status], 0);
@@ -487,11 +521,11 @@ impl CdRom {
                 }
                 self.read_lba = self.seek_target.to_lba();
                 self.drive = Drive::Reading;
-                self.status |= status::READING;
-                self.status &= !status::SEEKING;
-                // O primeiro setor sai na mesma cadência dos seguintes: o
-                // drive já está girando quando o `Setloc` cai perto da cabeça.
-                self.next_sector_in = self.cycles_per_sector();
+                // O drive primeiro posiciona e só então lê: até o primeiro
+                // setor chegar, o status reporta `seeking`, não `reading`.
+                self.status |= status::SEEKING;
+                self.status &= !status::READING;
+                self.next_sector_in = self.cycles_per_sector() + READ_START_DELAY;
                 self.acknowledge();
             }
 
@@ -516,23 +550,24 @@ impl CdRom {
             0x09 => {
                 self.drive = Drive::Idle;
                 self.status &= !status::READING;
-                self.acknowledge();
                 let status = self.status;
-                self.schedule(CdInterrupt::Complete, vec![status], ACKNOWLEDGE_DELAY * 5);
+                self.schedule(CdInterrupt::Acknowledge, vec![status], PAUSE_ACK_DELAY);
+                self.schedule(CdInterrupt::Complete, vec![status], PAUSE_COMPLETE_DELAY);
             }
 
             // Init — reset do controlador.
             0x0A => {
                 self.mode = 0;
+                self.header_valid = false;
                 self.drive = Drive::Idle;
                 self.status = if self.has_disc() {
                     status::MOTOR_ON
                 } else {
                     status::SHELL_OPEN
                 };
-                self.acknowledge();
                 let status = self.status;
-                self.schedule(CdInterrupt::Complete, vec![status], ACKNOWLEDGE_DELAY * 5);
+                self.schedule(CdInterrupt::Acknowledge, vec![status], INIT_ACK_DELAY);
+                self.schedule(CdInterrupt::Complete, vec![status], INIT_COMPLETE_DELAY);
             }
 
             // Mute / Demute — só afetam o mixer de CD-DA.
@@ -570,6 +605,10 @@ impl CdRom {
 
             // GetlocL — posição e header do último setor lido.
             0x10 => {
+                if !self.header_valid {
+                    self.error(0x80);
+                    return;
+                }
                 let [minute, second, frame] = self.position.to_bcd();
                 // Os três últimos bytes são o subheader; sem XA eles são zero.
                 let bytes = vec![minute, second, frame, 0x02, 0x00, 0x00, 0x00, 0x00];
@@ -616,10 +655,24 @@ impl CdRom {
 
             // SeekL / SeekP — posiciona a cabeça no alvo do Setloc.
             0x15 | 0x16 => {
-                if self.disc.is_none() {
+                let Some(disc) = self.disc.as_ref() else {
                     self.error(0x80);
                     return;
+                };
+                // Posicionar além do fim do disco é erro de seek: a cabeça não
+                // tem onde pousar, e o hardware responde INT5 em vez de fingir
+                // que chegou.
+                if self.seek_target.to_lba() >= disc.total_sectors() {
+                    self.header_valid = false;
+                    self.status |= status::SEEK_ERROR;
+                    self.error(0x04);
+                    return;
                 }
+                self.status &= !status::SEEK_ERROR;
+                // `SeekL` (0x15) posiciona **em modo de dados** e lê o header do
+                // setor de destino, então `GetlocL` passa a responder. `SeekP`
+                // (0x16) é seek de áudio: posiciona sem ler header.
+                self.header_valid = command == 0x15;
                 self.position = self.seek_target;
                 self.read_lba = self.seek_target.to_lba();
                 self.acknowledge();
@@ -721,7 +774,7 @@ mod tests {
 
     /// Espera a próxima IRQ e devolve o seu código.
     fn wait_irq(cdrom: &mut CdRom, irq: &mut IrqController) -> u8 {
-        for _ in 0..200 {
+        for _ in 0..400 {
             cdrom.step(20_000, irq);
             if cdrom.interrupt_flags != 0 {
                 return cdrom.interrupt_flags;
@@ -781,19 +834,23 @@ mod tests {
         let (mut cdrom, mut irq) = armed();
         cdrom.write(1, 0x0A); // Init: duas respostas
 
-        cdrom.step(ACKNOWLEDGE_DELAY as u32, &mut irq);
-        cdrom.write(0, 1);
-        assert_eq!(cdrom.read(3) & 0x1F, CdInterrupt::Acknowledge as u8);
+        assert_eq!(
+            wait_irq(&mut cdrom, &mut irq),
+            CdInterrupt::Acknowledge as u8
+        );
 
         // Sem acknowledge, a segunda resposta não chega.
-        cdrom.step(ACKNOWLEDGE_DELAY as u32 * 10, &mut irq);
+        for _ in 0..200 {
+            cdrom.step(20_000, &mut irq);
+        }
+        cdrom.write(0, 1);
         assert_eq!(cdrom.read(3) & 0x1F, CdInterrupt::Acknowledge as u8);
 
         cdrom.write(3, 0x07);
         assert_eq!(cdrom.read(3) & 0x1F, 0);
+        cdrom.write(0, 0);
 
-        cdrom.step(ACKNOWLEDGE_DELAY as u32 * 10, &mut irq);
-        assert_eq!(cdrom.read(3) & 0x1F, CdInterrupt::Complete as u8);
+        assert_eq!(wait_irq(&mut cdrom, &mut irq), CdInterrupt::Complete as u8);
     }
 
     #[test]
@@ -1116,7 +1173,14 @@ mod tests {
         command(&mut cdrom, 0x06, &[]);
         wait_irq(&mut cdrom, &mut irq);
         ack(&mut cdrom);
+        // Logo após o ReadN o drive ainda está posicionando.
+        assert_ne!(cdrom.status & status::SEEKING, 0);
+        assert_eq!(cdrom.status & status::READING, 0);
+
+        // O primeiro setor troca posicionamento por leitura.
+        assert_eq!(wait_irq(&mut cdrom, &mut irq), CdInterrupt::DataReady as u8);
         assert_ne!(cdrom.status & status::READING, 0);
+        ack(&mut cdrom);
 
         command(&mut cdrom, 0x09, &[]); // Pause
         wait_irq(&mut cdrom, &mut irq);
