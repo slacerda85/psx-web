@@ -68,27 +68,16 @@ levou às correções de GTE, SIO e DMA: rodar, ler a diferença, isolar.
 | `cdrom/disc-swap` | Espera um humano abrir a tampa — não automatizável sem um gatilho sintético no harness |
 | `cdrom/getloc` | Bits de status durante seek e leitura, e as respostas de `GetlocL`/`GetlocP` |
 
-## A trava do Xenogears
+## Onde os jogos param
 
-O jogo carrega, executa 299 setores de código próprio e entra num laço
-`Pause → Setloc → ReadN` infinito, com todos os contadores de
-diagnóstico em zero. Não é funcionalidade faltando.
+Os dois discos de teste passam pelo BOOTSTRAP LOADER, carregam o executável,
+executam código próprio e inicializam o driver de controle. Nenhum desenha na
+tela ainda: os dois param no streaming de XA, sem nunca chegar a usar o MDEC.
 
-O que já foi medido e **descartado**:
-
-- Não é o MDEC: implementá-lo não mudou nada.
-- Não é o GTE, a GPU nem o SIO0, todos verificados contra o console.
-- Não é o mapeamento de LBA: o header BCD do setor confere com o MSF pedido.
-- Não é o fim do disco nem o gate de acknowledge do drive: instrumentados,
-  nenhum dos dois é atingido durante a trava.
-
-O que ficou sem explicação: o contador de `advance_read` **não expira**
-durante a trava, embora o drive esteja em `Reading` e o jogo espere mais
-ciclos do que o período de um setor. Medindo do `ReadN` até o `Pause`, a
-espera acompanha a latência que configuramos mais ~331 ciclos, seja qual for o
-valor — como se o jogo reagisse ao nosso timing em vez de a um prazo fixo.
-Essa contradição é o fio a puxar na próxima sessão.
-
+O Xenogears monta o display de 24 bits do FMV de abertura e para de recolher
+setores — o drive entrega quase 7000, ele recolhe 365. O Grandstream Saga nem
+liga o display. O diagnóstico completo dos dois, com o que já foi descartado,
+está em [erros-e-ajustes.md](erros-e-ajustes.md).
 
 ## Já corrigidos por esta comparação
 
