@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut skip = 0u32;
     // Endereço de RAM a observar frame a frame.
     let mut watch: Option<u32> = None;
+    let mut dumps: Vec<(u32, u32)> = Vec::new();
 
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -34,6 +35,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--disc" => disc_path = Some(value()?),
             "--frames" => frames = value()?.parse()?,
             "--skip" => skip = value()?.parse()?,
+            "--dump" => {
+                let text = value()?;
+                let (addr, count) = text.split_once(":").unwrap_or((text.as_str(), "16"));
+                dumps.push((
+                    u32::from_str_radix(addr.trim_start_matches("0x"), 16)?,
+                    count.parse()?,
+                ));
+            }
             "--watch" => {
                 let text = value()?;
                 let text = text.trim_start_matches("0x");
@@ -88,6 +97,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    for &(base, count) in &dumps {
+        println!("\n--- {base:#010X} ({count} palavras) ---");
+        for offset in 0..count {
+            let address = base.wrapping_add(offset * 4);
+            let word = system.bus().ram.read32(psx_core::memory::physical(address));
+            println!("  {address:#010X}  {word:#010X}  {}", decode(word));
+        }
+    }
+
     // As palavras em volta do endereço mais quente: é o laço que trava.
     if let Some(&(hot, _)) = entries.first() {
         println!("\ninstruções em volta de {hot:#010X}:");
@@ -132,25 +150,48 @@ fn decode(word: u32) -> String {
     match op {
         0x00 => match funct {
             _ if word == 0 => "nop".into(),
+            0x00 => format!("sll    r{rd}, r{rt}, {}", (word >> 6) & 0x1F),
+            0x02 => format!("srl    r{rd}, r{rt}, {}", (word >> 6) & 0x1F),
+            0x03 => format!("sra    r{rd}, r{rt}, {}", (word >> 6) & 0x1F),
             0x08 => format!("jr     r{rs}"),
             0x09 => format!("jalr   r{rd}, r{rs}"),
+            0x0C => "syscall".into(),
+            0x20 => format!("add    r{rd}, r{rs}, r{rt}"),
             0x21 => format!("addu   r{rd}, r{rs}, r{rt}"),
+            0x23 => format!("subu   r{rd}, r{rs}, r{rt}"),
             0x24 => format!("and    r{rd}, r{rs}, r{rt}"),
             0x25 => format!("or     r{rd}, r{rs}, r{rt}"),
+            0x2A => format!("slt    r{rd}, r{rs}, r{rt}"),
+            0x2B => format!("sltu   r{rd}, r{rs}, r{rt}"),
             _ => format!("special {funct:#04X}"),
+        },
+        0x01 => match rt {
+            0x00 => format!("bltz   r{rs}, {imm:+}"),
+            0x01 => format!("bgez   r{rs}, {imm:+}"),
+            _ => format!("regimm {rt:#04X}"),
         },
         0x02 => format!("j      {:#010X}", (word & 0x03FF_FFFF) << 2),
         0x03 => format!("jal    {:#010X}", (word & 0x03FF_FFFF) << 2),
         0x04 => format!("beq    r{rs}, r{rt}, {imm:+}"),
         0x05 => format!("bne    r{rs}, r{rt}, {imm:+}"),
+        0x06 => format!("blez   r{rs}, {imm:+}"),
+        0x07 => format!("bgtz   r{rs}, {imm:+}"),
         0x08 => format!("addi   r{rt}, r{rs}, {imm}"),
         0x09 => format!("addiu  r{rt}, r{rs}, {imm}"),
+        0x0A => format!("slti   r{rt}, r{rs}, {imm}"),
+        0x0B => format!("sltiu  r{rt}, r{rs}, {imm}"),
         0x0C => format!("andi   r{rt}, r{rs}, {:#06X}", word as u16),
+        0x0D => format!("ori    r{rt}, r{rs}, {:#06X}", word as u16),
         0x0F => format!("lui    r{rt}, {:#06X}", word as u16),
+        0x10 => format!("cop0   {:#010X}", word & 0x03FF_FFFF),
+        0x12 => format!("cop2   {:#010X}", word & 0x01FF_FFFF),
         0x20 => format!("lb     r{rt}, {imm} off r{rs}"),
+        0x21 => format!("lh     r{rt}, {imm} off r{rs}"),
         0x23 => format!("lw     r{rt}, {imm} off r{rs}"),
         0x24 => format!("lbu    r{rt}, {imm} off r{rs}"),
+        0x25 => format!("lhu    r{rt}, {imm} off r{rs}"),
         0x28 => format!("sb     r{rt}, {imm} off r{rs}"),
+        0x29 => format!("sh     r{rt}, {imm} off r{rs}"),
         0x2B => format!("sw     r{rt}, {imm} off r{rs}"),
         _ => format!("op {op:#04X}"),
     }
