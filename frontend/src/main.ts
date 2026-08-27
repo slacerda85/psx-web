@@ -95,6 +95,9 @@ class App {
     buttons.pickExe.addEventListener('click', () => {
       void this.pick('.exe,.psexe', 'exe');
     });
+    buttons.pickDisc.addEventListener('click', () => {
+      void this.pick('.iso,.bin,.img', 'disc');
+    });
 
     buttons.keys.addEventListener('click', () => {
       this.ui.renderKeymap(this.input, () => void this.persistKeymap());
@@ -120,7 +123,7 @@ class App {
       this.audio.setVolume(Number(selects.volume.value) / 100);
     });
 
-    this.ui.onFileDropped((file, kind) => void this.handleFile(file, kind));
+    this.ui.onFilesDropped((files) => void this.handleFiles(files));
 
     // Pausar ao trocar de aba evita que o acumulador de tempo estoure e o
     // emulador tente recuperar centenas de frames de uma vez ao voltar.
@@ -160,16 +163,73 @@ class App {
 
   // ------------------------------------------------------------ arquivos
 
-  private async handleFile(file: File, kind: DroppedKind): Promise<void> {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-
-    if (kind === 'disc') {
-      // O controlador de CD-ROM ainda nao consome imagens; dizer isso e
-      // melhor do que aceitar o arquivo e nao rodar nada.
-      this.ui.setChip('disc', 'warn', 'Disco (parcial)');
-      this.ui.notify('Imagens de disco ainda não são suportadas — em implementação pelo agente @cdrom.', 'error');
+  /**
+   * Trata um lote de arquivos soltos de uma vez.
+   *
+   * Um jogo em CUE+BIN chega como dois arquivos: a folha sozinha nao serve, e
+   * o nome que ela declara quase nunca bate com o binario baixado. Por isso o
+   * par e resolvido aqui, e nao pela extensao de cada arquivo isolado.
+   */
+  private async handleFiles(files: File[]): Promise<void> {
+    const cue = files.find((file) => file.name.toLowerCase().endsWith('.cue'));
+    if (cue) {
+      const binary = files.find((file) => file !== cue);
+      if (!binary) {
+        this.ui.notify(
+          'Solte o .cue e o .bin juntos: a folha sozinha não diz onde estão os dados.',
+          'error',
+        );
+        return;
+      }
+      await this.loadDisc(binary, cue);
       return;
     }
+
+    for (const file of files) {
+      await this.handleFile(file, Ui.classify(file.name, file.size));
+    }
+  }
+
+  /** Insere um disco, com ou sem folha CUE. */
+  private async loadDisc(image: File, cue?: File): Promise<void> {
+    if (!this.emulator) {
+      this.ui.notify('Carregue uma BIOS antes de inserir um disco.', 'error');
+      return;
+    }
+
+    this.ui.notify(`Lendo ${image.name}…`);
+    try {
+      // Um jogo de PSX passa de 700 MB. `arrayBuffer()` traz tudo para a
+      // memoria do WASM de uma vez — pesado, mas e o unico caminho enquanto o
+      // core nao le setores sob demanda.
+      const bytes = new Uint8Array(await image.arrayBuffer());
+      if (cue) {
+        this.emulator.loadDiscWithCue(await cue.text(), bytes);
+      } else {
+        this.emulator.loadDisc(bytes);
+      }
+    } catch (error) {
+      this.ui.setChip('disc', 'off', 'Disco');
+      this.ui.notify(describe(error), 'error');
+      return;
+    }
+
+    const info = this.emulator.discInfo();
+    this.ui.setChip('disc', 'on', 'Disco');
+    this.ui.notify(`${image.name} inserido — ${info}`);
+    // Um disco novo so e lido a partir do boot; o console reinicia sozinho,
+    // como acontece ao fechar a bandeja no hardware.
+    this.reset(false);
+    if (!this.running) await this.toggleRun();
+  }
+
+  private async handleFile(file: File, kind: DroppedKind): Promise<void> {
+    if (kind === 'disc') {
+      await this.loadDisc(file);
+      return;
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
 
     if (kind === 'exe') {
       if (!this.emulator) {
@@ -251,12 +311,19 @@ class App {
     this.rafHandle = requestAnimationFrame(this.tick);
   }
 
-  private reset(): void {
+  /**
+   * Reinicia o console.
+   *
+   * `announce` e falso quando o reset e efeito colateral de outra acao — ao
+   * inserir um disco, por exemplo, o aviso do disco e o que interessa e nao
+   * pode ser sobrescrito por um "console reiniciado" logo em seguida.
+   */
+  private reset(announce = true): void {
     this.emulator?.reset();
     this.audio.flush();
     this.renderer.clear();
     this.accumulator = 0;
-    this.ui.notify('Console reiniciado.');
+    if (announce) this.ui.notify('Console reiniciado.');
   }
 
   private readonly tick = (timestamp: number): void => {

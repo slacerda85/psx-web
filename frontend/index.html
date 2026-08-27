@@ -26,7 +26,7 @@
       <main class="stage" id="stage">
         <canvas id="screen" width="320" height="240" aria-label="Saída de vídeo do emulador"></canvas>
         <div class="dropzone" id="dropzone" hidden>
-          <p>Solte a BIOS, um <code>.exe</code> ou uma imagem de disco</p>
+          <p>Solte a BIOS, um <code>.exe</code>, ou o <code>.cue</code> e o <code>.bin</code> juntos</p>
         </div>
         <div class="onboarding" id="onboarding">
           <h2>Carregue uma BIOS para começar</h2>
@@ -36,7 +36,6 @@
           </p>
           <div class="onboarding-actions">
             <button type="button" class="primary" id="pick-bios">Escolher BIOS…</button>
-            <button type="button" id="pick-exe">Carregar .exe</button>
           </div>
           <p class="hint">Ou arraste o arquivo para esta janela.</p>
         </div>
@@ -46,6 +45,8 @@
         <button type="button" id="btn-run" disabled>Iniciar</button>
         <button type="button" id="btn-reset" disabled>Reiniciar</button>
         <button type="button" id="btn-fast" disabled aria-pressed="false">Avanço rápido</button>
+        <button type="button" id="pick-disc">Inserir disco…</button>
+        <button type="button" id="pick-exe">Carregar .exe</button>
         <label class="field">
           Região
           <select id="select-region">

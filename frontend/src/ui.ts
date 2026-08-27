@@ -14,6 +14,9 @@ export type ChipState = 'off' | 'on' | 'warn';
 const EXE_EXTENSIONS = ['.exe', '.psexe', '.psx'];
 const DISC_EXTENSIONS = ['.iso', '.cue', '.img', '.chd'];
 
+/** Uma BIOS de PSX tem exatamente 512 KB — e o que a separa de um .bin de jogo. */
+const BIOS_SIZE = 512 * 1024;
+
 export type DroppedKind = 'bios' | 'exe' | 'disc';
 
 function element<T extends HTMLElement>(id: string): T {
@@ -53,6 +56,7 @@ export class Ui {
     keys: element<HTMLButtonElement>('btn-keys'),
     pickBios: element<HTMLButtonElement>('pick-bios'),
     pickExe: element<HTMLButtonElement>('pick-exe'),
+    pickDisc: element<HTMLButtonElement>('pick-disc'),
     keysReset: element<HTMLButtonElement>('keys-reset'),
   };
 
@@ -140,8 +144,12 @@ export class Ui {
    * Liga o drag-and-drop na janela inteira e classifica o arquivo pela
    * extensao — a BIOS e o caso padrao porque e o primeiro arquivo que todo
    * usuario precisa carregar.
+   *
+   * Soltar varios arquivos de uma vez e o caminho de um jogo em CUE+BIN: a
+   * folha sozinha nao basta, e o nome que ela declara quase nunca bate com o
+   * arquivo baixado.
    */
-  onFileDropped(handler: (file: File, kind: DroppedKind) => void): void {
+  onFilesDropped(handler: (files: File[]) => void): void {
     let depth = 0;
 
     const show = (visible: boolean) => {
@@ -168,9 +176,14 @@ export class Ui {
       event.preventDefault();
       depth = 0;
       show(false);
-      const file = event.dataTransfer?.files?.[0];
-      if (file) handler(file, classify(file.name));
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length > 0) handler(files);
     });
+  }
+
+  /** Classifica um arquivo pelo nome e, quando disponivel, pelo tamanho. */
+  static classify(name: string, size?: number): DroppedKind {
+    return classify(name, size);
   }
 
   renderDiagnostics(values: Record<string, number>): void {
@@ -225,9 +238,23 @@ export class Ui {
   }
 }
 
-function classify(name: string): DroppedKind {
+/**
+ * Decide o que um arquivo e.
+ *
+ * A extensao sozinha nao resolve: uma BIOS chama `SCPH1001.BIN` e uma imagem
+ * de jogo chama `jogo.bin`. O que separa os dois com seguranca e o tamanho —
+ * uma BIOS de PSX tem exatamente 512 KB, e nenhuma imagem de disco util e tao
+ * pequena.
+ */
+function classify(name: string, size?: number): DroppedKind {
   const lower = name.toLowerCase();
   if (EXE_EXTENSIONS.some((extension) => lower.endsWith(extension))) return 'exe';
+
+  if (lower.endsWith('.bin')) {
+    if (size === undefined) return 'bios';
+    return size === BIOS_SIZE ? 'bios' : 'disc';
+  }
+
   if (DISC_EXTENSIONS.some((extension) => lower.endsWith(extension))) return 'disc';
   return 'bios';
 }

@@ -109,6 +109,51 @@ impl Emulator {
         written
     }
 
+    /// Insere uma imagem de disco crua (ISO ou BIN de faixa única).
+    ///
+    /// O formato é deduzido do conteúdo, não da extensão.
+    #[wasm_bindgen(js_name = loadDisc)]
+    pub fn load_disc(&mut self, image: Vec<u8>) -> Result<(), JsError> {
+        self.system
+            .load_disc(image)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
+    /// Insere uma imagem descrita por uma folha CUE.
+    ///
+    /// O JavaScript entrega os dois arquivos: o core não sabe achar o `.bin`
+    /// que a folha referencia, e o nome dentro dela quase nunca sobrevive ao
+    /// download.
+    #[wasm_bindgen(js_name = loadDiscWithCue)]
+    pub fn load_disc_with_cue(&mut self, cue: &str, image: Vec<u8>) -> Result<(), JsError> {
+        self.system
+            .load_disc_with_cue(cue, image)
+            .map_err(|error| JsError::new(&error.to_string()))
+    }
+
+    /// Abre a bandeja.
+    #[wasm_bindgen(js_name = ejectDisc)]
+    pub fn eject_disc(&mut self) {
+        self.system.eject_disc();
+    }
+
+    /// Descrição curta do disco inserido, para a UI mostrar. Vazio sem disco.
+    #[wasm_bindgen(js_name = discInfo)]
+    pub fn disc_info(&self) -> String {
+        match self.system.disc() {
+            Some(disc) => {
+                let region = disc.region().id_bytes();
+                format!(
+                    "{} · {} setores · {} faixa(s)",
+                    String::from_utf8_lossy(&region),
+                    disc.total_sectors(),
+                    disc.tracks().len()
+                )
+            }
+            None => String::new(),
+        }
+    }
+
     /// Carrega um `PS-X EXE` (homebrew ou binário de teste) e salta para ele.
     #[wasm_bindgen(js_name = loadExe)]
     pub fn load_exe(&mut self, data: &[u8]) -> Result<(), JsError> {
