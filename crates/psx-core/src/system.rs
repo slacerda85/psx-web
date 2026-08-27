@@ -26,9 +26,6 @@ pub const VIDEO_HEIGHT_MAX: usize = FRAME_HEIGHT_MAX;
 /// injetado, com o kernel já inicializado.
 pub const SHELL_ENTRY_POINT: u32 = 0x8003_0000;
 
-/// Granularidade com que o SIO0 é acertado dentro de uma scanline.
-const SIO_STEP_CYCLES: u32 = 128;
-
 /// Resumo do que aconteceu num frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameStats {
@@ -131,7 +128,6 @@ impl System {
 
         let mut spent = 0u64;
         let mut instructions = 0u64;
-        let mut since_sio = 0u32;
 
         while self.cycle_debt > 0 {
             self.capture_tty();
@@ -140,25 +136,20 @@ impl System {
             spent += cycles as u64;
             instructions += 1;
 
-            // O SIO0 precisa de resolução bem menor que uma scanline: o
-            // `/ACK` do controller chega ~338 ciclos depois do byte, e o BIOS
-            // desiste antes disso. Acertá-lo só no fim da linha (~2145 ciclos)
-            // faria todo controller parecer ausente.
-            since_sio += cycles;
-            if since_sio >= SIO_STEP_CYCLES {
-                self.bus.sio.step(since_sio, &mut self.bus.irq);
-                since_sio = 0;
-            }
-        }
-        if since_sio > 0 {
-            self.bus.sio.step(since_sio, &mut self.bus.irq);
+            // SIO0 e timers andam junto com a CPU, e não em bloco no fim da
+            // scanline. O `/ACK` do controller chega ~338 ciclos depois do
+            // byte e o BIOS desiste antes disso; e um jogo que lê o contador no
+            // meio do frame veria saltos de 2145 em 2145 no lugar do valor
+            // corrente. Custa ~8% de desempenho e é o que faz o contador bater
+            // exatamente com o console.
+            self.bus.sio.step(cycles, &mut self.bus.irq);
+            self.bus.timers.step(cycles, &mut self.bus.irq);
         }
 
         // Os periféricos avançam em bloco no fim da scanline. Isso é grosso o
         // bastante para o boot e para jogos que não dependem de timing de
         // sub-scanline; refiná-lo é trabalho do scheduler ciclo-a-ciclo.
         let elapsed = spent as u32;
-        self.bus.timers.step(elapsed, &mut self.bus.irq);
         self.bus.cdrom.step(elapsed, &mut self.bus.irq);
         self.bus.spu.step(elapsed);
 

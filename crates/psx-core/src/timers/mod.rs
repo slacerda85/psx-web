@@ -108,24 +108,31 @@ impl Timers {
         let source = timer.clock_source();
 
         // PSX-SPX: a interpretação dos 2 bits muda por timer.
-        let divider = match (index, source) {
-            // Timer 0: dotclock nos modos 1 e 3. O dotclock é ~1/6 do clock da
-            // CPU em 320 px, que é a resolução mais comum.
-            (0, 1) | (0, 3) => 6,
-            // Timer 1: hblank nos modos 1 e 3 — uma scanline tem ~2154 ciclos.
-            (1, 1) | (1, 3) => 2154,
-            // Timer 2: system clock / 8 nos modos 2 e 3.
-            (2, 2) | (2, 3) => 8,
-            _ => 1,
+        //
+        // As fontes de vídeo não são divisores inteiros do clock da CPU. A GPU
+        // roda a 53.2224 MHz contra os 33.8688 MHz da CPU — razão exata de
+        // 11/7 — então cada fonte derivada do vídeo vira uma fração, e
+        // arredondá-la para um inteiro erra o contador em ~20%.
+        let (numerator, denominator) = match (index, source) {
+            // Timer 0 — dotclock. Em 320 px o dot dura 8 ciclos de GPU, ou
+            // 8 * 7/11 ciclos de CPU. As outras resoluções usam divisores
+            // diferentes; modelá-las exige a resolução corrente da GPU.
+            (0, 1) | (0, 3) => (11, 56),
+            // Timer 1 — hblank. Uma scanline NTSC tem 3413 dots de GPU.
+            (1, 1) | (1, 3) => (11, 3413 * 7),
+            // Timer 2 — system clock / 8.
+            (2, 2) | (2, 3) => (1, 8),
+            _ => (1, 1),
         };
 
-        if divider == 1 {
+        if denominator == 1 {
             return cycles;
         }
 
-        timer.fraction += cycles;
-        let ticks = timer.fraction / divider;
-        timer.fraction %= divider;
+        // O resto fica no acumulador para não perder fração entre chamadas.
+        timer.fraction += cycles * numerator;
+        let ticks = timer.fraction / denominator;
+        timer.fraction %= denominator;
         ticks
     }
 
