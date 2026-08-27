@@ -171,6 +171,11 @@ impl Mdec {
         status
     }
 
+    /// Palavras decodificadas à espera de serem lidas.
+    pub fn pending_output(&self) -> usize {
+        self.output.len()
+    }
+
     /// `0x1F80_1820` — leitura da saída decodificada.
     pub fn read_data(&mut self) -> u32 {
         self.output.pop_front().unwrap_or(0)
@@ -388,9 +393,9 @@ impl Mdec {
                 for y in 0..8 {
                     let mut sum = 0i64;
                     for z in 0..8 {
-                        sum += source[y + z * 8] as i64 * (self.scale[x + z * 8] as i64 / 8);
+                        sum += source[y + z * 8] as i64 * (self.scale[x + z * 8] as i64 >> 3);
                     }
-                    destination[x + y * 8] = ((sum + 0x0FFF) / 0x2000) as i16;
+                    destination[x + y * 8] = ((sum + 0x0FFF) >> 13) as i16;
                 }
             }
         }

@@ -35,18 +35,13 @@ serão resolvidos juntos, quando houver um scheduler que intercale DMA e CPU.
 | `mdec/4bit`, `mdec/8bit`, `mdec/step-by-step-log` | O MDEC existe e decodifica; ver abaixo |
 | `spu/memory-transfer` | Caminho de transferência da SPU RAM |
 
-## MDEC — decodifica, mas o transporte diverge
+## MDEC — decodifica e transporta, com arredondamento residual
 
-O decodificador está implementado: RLE, dequantização, IDCT e conversão
-YUV→RGB. Os valores conferem — onde o console produz o pixel `0` e depois
-`15`, o nosso IDCT dá `-144` e `140`, que saturam exatamente nesses dois.
-
-O que falha é o DMA de saída. O teste configura o canal 1 com `BCR = 0x20`
-(tamanho de bloco `0x20`, contagem **zero**), então nada é transferido; no
-console o mesmo teste usa tamanho de bloco `0x8` e contagem `1`. O teste
-deriva esse tamanho de algo que reportamos diferente do hardware —
-provavelmente um campo do registrador de status — e é aí que a investigação
-deve continuar.
+O decodificador e o DMA de saída funcionam. Comparado ao console em 8 bpp, a
+maioria dos bytes bate exatamente e alguns divergem em 1 ou 2 — arredondamento
+dentro do IDCT, não erro estrutural. Bom o bastante para FMV; ficar bit a bit
+igual exige achar o arredondamento exato que o silício usa nos deslocamentos
+internos.
 
 ## Bugs a investigar
 

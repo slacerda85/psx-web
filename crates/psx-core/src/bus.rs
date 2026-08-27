@@ -432,6 +432,15 @@ impl Bus {
         let mut address = channel.base;
         let mut remaining = channel.transfer_size().unwrap_or(0);
 
+        // `SyncMode 1` é dirigido pelo pedido do dispositivo, e não pela
+        // contagem de blocos: o canal move dados enquanto o periférico os
+        // oferecer. O MDEC entrega exatamente o macrobloco que decodificou, e
+        // tanto os jogos quanto o ps1-tests contam com isso — o teste chega a
+        // programar a contagem em zero e ainda assim recebe o bloco inteiro.
+        if port == Port::MdecOut && channel.sync() == Sync::Request {
+            remaining = self.mdec.pending_output() as u32;
+        }
+
         while remaining > 0 {
             // O hardware força o endereço para dentro dos 2 MB.
             let masked = address & 0x001F_FFFC;
