@@ -186,6 +186,17 @@ impl Cpu {
             return 1;
         }
 
+        // A scratchpad não é executável: buscar instrução dela dá bus error
+        // no console, e não código válido.
+        if !crate::memory::is_executable(self.current_pc) {
+            self.cop0.bad_vaddr = self.current_pc;
+            self.in_delay_slot = self.branch_taken;
+            self.branch_taken = false;
+            self.raise(Exception::BusErrorInstruction);
+            self.cycles += 1;
+            return 1;
+        }
+
         let instruction = Instruction(bus.load32(self.current_pc));
 
         self.pc = self.next_pc;

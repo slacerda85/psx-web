@@ -289,10 +289,13 @@ impl Gpu {
         status |= (self.irq_requested as u32) << 24;
 
         // Bits 26..28 anunciam prontidão. O interpretador termina cada comando
-        // instantaneamente, então estamos sempre prontos — exceto para enviar
-        // VRAM quando não há transferência de leitura ativa.
+        // instantaneamente, então estamos sempre prontos para receber.
         status |= 1 << 26; // pronto para receber comando
-        status |= (matches!(self.mode, Gp0Mode::Command) as u32) << 27;
+                           // O bit 27 diz que há **dado de VRAM esperando** para ser lido, e não
+                           // que a GPU está livre: só sobe durante uma transferência VRAM→CPU.
+                           // Anunciá-lo em repouso faz o software concluir que há imagem pronta
+                           // quando não há.
+        status |= (self.reading_vram as u32) << 27;
         status |= 1 << 28; // pronto para receber bloco de DMA
 
         status |= (self.dma_direction as u32) << 29;

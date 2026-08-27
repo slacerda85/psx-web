@@ -67,6 +67,16 @@ pub const REGION_BIOS: Range = Range(0x1FC0_0000, 512 * 1024);
 /// Cache control, único registrador visível em KSEG2.
 pub const REGION_CACHE_CONTROL: Range = Range(0xFFFE_0130, 4);
 
+/// A CPU pode buscar instrução deste endereço?
+///
+/// A scratchpad é alcançável por load e store, mas não pelo barramento de
+/// instrução: o console responde com bus error em vez de executar o que
+/// estiver lá. O bloco de I/O, ao contrário, **é** buscável — o teste
+/// `cpu/code-in-io` confirma que SPU e DMA executam de lá.
+pub fn is_executable(address: u32) -> bool {
+    REGION_SCRATCHPAD.contains(physical(address)).is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
