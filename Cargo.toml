@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/psx-core", "crates/psx-wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/slace85/psx-web-emulator"
+
+[workspace.dependencies]
+psx-core = { path = "crates/psx-core" }
+
+# O core roda dentro de um loop de emulação apertado. Mesmo em debug queremos
+# otimização suficiente para que os testes de integração (boot de BIOS) rodem
+# em tempo razoável.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

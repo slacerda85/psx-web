@@ -1,0 +1,24 @@
+/target
+**/node_modules/
+frontend/dist/
+frontend/src/wasm/
+frontend/playwright-report/
+frontend/test-results/
+
+# Material protegido por direitos autorais: BIOS, jogos e saves ficam SÓ na
+# máquina local. As pastas inteiras são ignoradas, e não apenas as extensões
+# conhecidas — um arquivo novo aqui dentro nunca deve escapar por descuido.
+/bios/
+/games/
+
+# Rede de segurança, caso esse material apareça fora das pastas acima.
+*.bin
+*.BIN
+*.rom
+*.iso
+*.cue
+*.img
+*.chd
+*.mcd
+*.ecm
+*.pbp
