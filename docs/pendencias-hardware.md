@@ -27,7 +27,6 @@ serão resolvidos juntos, quando houver um scheduler que intercale DMA e CPU.
 | --- | --- |
 | `dma/chopping` | Ciclos que o DMA rouba da CPU por bloco (reportamos 0) |
 | `gpu/bandwidth` | Vazão de transferências para a VRAM |
-| `cpu/access-time` | Waitstates por região do mapa de memória |
 | `cdrom/timing` | Latência de resposta dos comandos do drive |
 | `timers` / `timer-dump` | Os contadores já batem exatamente; o que falha é o custo do DMA aparecer como zero |
 | `dma/chain-looping` | Cadeia auto-referente: o comportamento observável (não conclui, sem IRQ) já bate; sobra o custo em ciclos |
@@ -46,6 +45,16 @@ maioria dos bytes bate exatamente e alguns divergem em 1 ou 2 — arredondamento
 dentro do IDCT, não erro estrutural. Bom o bastante para FMV; ficar bit a bit
 igual exige achar o arredondamento exato que o silício usa nos deslocamentos
 internos.
+
+## Tempo de acesso à memória — resolvido
+
+O `cpu/access-time` agora fica dentro de um ciclo do console em todas as
+regiões. Ele continua marcado como diferente porque o log de referência traz
+médias com jitter — o console mede 5,21, 5,3 e 5,14 ciclos para o mesmo acesso
+à RAM, e igualdade textual é impossível por construção.
+
+Não era refinamento: com um ciclo por acesso, a `VSync()` da biblioteca da
+Sony estourava o prazo em todo quadro e nenhum jogo passava do boot.
 
 ## Bugs a investigar
 
