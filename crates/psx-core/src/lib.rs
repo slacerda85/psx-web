@@ -76,6 +76,14 @@ pub enum PsxError {
     TruncatedExe(usize),
     /// O executável declara um destino fora da RAM de 2 MB.
     ExeOutOfRange { dest: u32, len: u32 },
+    /// A imagem de disco não pôde ser interpretada.
+    Disc(cdrom::DiscError),
+}
+
+impl From<cdrom::DiscError> for PsxError {
+    fn from(error: cdrom::DiscError) -> Self {
+        PsxError::Disc(error)
+    }
 }
 
 impl core::fmt::Display for PsxError {
@@ -91,6 +99,7 @@ impl core::fmt::Display for PsxError {
             PsxError::ExeOutOfRange { dest, len } => {
                 write!(f, "PS-X EXE aponta para {dest:#010X} (+{len}) fora da RAM")
             }
+            PsxError::Disc(error) => write!(f, "imagem de disco inválida: {error}"),
         }
     }
 }

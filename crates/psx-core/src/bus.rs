@@ -419,7 +419,7 @@ impl Bus {
                         }
                         Port::Gpu => self.gpu.read(),
                         Port::Spu => self.spu.dma_read(),
-                        // TODO(@cdrom): entregar setores lidos.
+                        Port::CdRom => self.cdrom.dma_read(),
                         _ => 0,
                     };
                     self.ram.write32(masked, word);

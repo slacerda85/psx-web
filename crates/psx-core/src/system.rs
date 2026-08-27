@@ -6,6 +6,7 @@
 
 use crate::bios::Bios;
 use crate::bus::Bus;
+use crate::cdrom::Disc;
 use crate::cpu::Cpu;
 use crate::exe::Executable;
 use crate::gpu::{FRAME_HEIGHT_MAX, FRAME_WIDTH_MAX};
@@ -58,11 +59,17 @@ impl System {
         }
     }
 
-    /// Reinicia o console mantendo a BIOS carregada.
+    /// Reinicia o console mantendo a BIOS e o disco carregados.
+    ///
+    /// Apertar reset no console não abre a bandeja — o disco continua lá.
     pub fn reset(&mut self) {
         self.cpu.reset();
         let bios = self.bus.bios.clone();
+        let disc = self.bus.cdrom.disc().cloned();
         self.bus = Bus::new(bios);
+        if let Some(disc) = disc {
+            self.bus.cdrom.insert_disc(disc);
+        }
         self.cycle_debt = 0;
     }
 
@@ -163,6 +170,37 @@ impl System {
             }
         }
         false
+    }
+
+    /// Insere uma imagem de disco (ISO ou BIN de faixa única).
+    ///
+    /// O formato é deduzido do conteúdo, não da extensão. Para um jogo com
+    /// folha CUE, use [`Self::load_disc_with_cue`]: sem ela as faixas de
+    /// áudio ficam invisíveis.
+    pub fn load_disc(&mut self, image: Vec<u8>) -> Result<(), PsxError> {
+        let disc = Disc::from_image(image)?;
+        self.bus.cdrom.insert_disc(disc);
+        Ok(())
+    }
+
+    /// Insere uma imagem descrita por uma folha CUE.
+    ///
+    /// O core não abre arquivos: quem localiza o binário que a folha
+    /// referencia é o embedder, que é quem tem sistema de arquivos.
+    pub fn load_disc_with_cue(&mut self, cue: &str, image: Vec<u8>) -> Result<(), PsxError> {
+        let disc = Disc::from_cue(cue, image)?;
+        self.bus.cdrom.insert_disc(disc);
+        Ok(())
+    }
+
+    /// Abre a bandeja.
+    pub fn eject_disc(&mut self) {
+        self.bus.cdrom.eject();
+    }
+
+    /// A imagem inserida, se houver.
+    pub fn disc(&self) -> Option<&Disc> {
+        self.bus.cdrom.disc()
     }
 
     /// Carrega um `PS-X EXE` em RAM e salta para ele.
@@ -396,5 +434,65 @@ mod tests {
         let pal = system.run_frame().cycles;
 
         assert!(pal > ntsc, "PAL: {pal}, NTSC: {ntsc}");
+    }
+}
+
+#[cfg(test)]
+mod disc_tests {
+    use super::*;
+    use crate::cdrom::SECTOR_USER;
+
+    #[test]
+    fn loading_an_iso_makes_the_drive_report_a_disc() {
+        let mut system = System::new(Bios::stub());
+        assert!(system.disc().is_none());
+
+        system
+            .load_disc(vec![0u8; SECTOR_USER * 32])
+            .expect("ISO válido");
+
+        assert_eq!(system.disc().map(|disc| disc.total_sectors()), Some(32));
+    }
+
+    #[test]
+    fn a_cue_sheet_describes_the_tracks() {
+        let mut system = System::new(Bios::stub());
+        let cue = "FILE \"j.bin\" BINARY\n TRACK 01 MODE1/2048\n  INDEX 01 00:00:00\n";
+
+        system
+            .load_disc_with_cue(cue, vec![0u8; SECTOR_USER * 8])
+            .expect("CUE válido");
+
+        assert_eq!(system.disc().map(|disc| disc.tracks().len()), Some(1));
+    }
+
+    #[test]
+    fn reset_keeps_the_disc_in_the_tray() {
+        let mut system = System::new(Bios::stub());
+        system.load_disc(vec![0u8; SECTOR_USER * 8]).unwrap();
+
+        system.reset();
+
+        assert!(
+            system.disc().is_some(),
+            "apertar reset no console não abre a bandeja"
+        );
+    }
+
+    #[test]
+    fn ejecting_empties_the_tray() {
+        let mut system = System::new(Bios::stub());
+        system.load_disc(vec![0u8; SECTOR_USER * 8]).unwrap();
+
+        system.eject_disc();
+
+        assert!(system.disc().is_none());
+    }
+
+    #[test]
+    fn a_malformed_image_is_reported_instead_of_silently_ignored() {
+        let mut system = System::new(Bios::stub());
+        let error = system.load_disc(vec![0u8; 1234]).unwrap_err();
+        assert!(matches!(error, PsxError::Disc(_)), "erro foi {error:?}");
     }
 }
