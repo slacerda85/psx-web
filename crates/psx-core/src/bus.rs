@@ -5,6 +5,8 @@
 //! Toda a decodificação parte do endereço **físico** ([`memory::physical`]),
 //! porque KUSEG, KSEG0 e KSEG1 são espelhos da mesma memória.
 
+use std::collections::VecDeque;
+
 use crate::bios::Bios;
 use crate::cdrom::CdRom;
 use crate::dma::{Direction, Dma, Port, Sync};
@@ -45,6 +47,13 @@ pub struct Bus {
     /// `0xFFFE_0130` — cache control.
     cache_control: u32,
 
+    /// Rastro dos últimos acessos ao bloco de I/O, quando ligado.
+    ///
+    /// Serve para responder "o que o jogo pediu ao hardware antes de parar":
+    /// um laço de espera é sempre o mesmo punhado de registradores repetindo,
+    /// e ver quais são e o que devolvemos costuma bastar.
+    trace: Option<IoTrace>,
+
     /// Acessos a endereços sem mapeamento, para diagnóstico.
     unhandled_reads: u64,
     unhandled_writes: u64,
@@ -65,6 +74,7 @@ impl Bus {
             cdrom: CdRom::new(),
             sio: Sio::new(),
             mdec: Mdec::new(),
+            trace: None,
             memory_control: [0; 9],
             ram_size: 0x0000_0B88,
             cache_control: 0,
@@ -72,6 +82,47 @@ impl Bus {
             unhandled_writes: 0,
             last_unhandled_address: 0,
         }
+    }
+
+    /// Liga o rastro de I/O, guardando os últimos `capacity` acessos.
+    pub fn start_io_trace(&mut self, capacity: usize) {
+        self.trace = Some(IoTrace {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+            pc: 0,
+        });
+    }
+
+    /// Informa o `PC` corrente, para o rastro dizer quem fez cada acesso.
+    pub fn set_trace_pc(&mut self, pc: u32) {
+        if let Some(trace) = self.trace.as_mut() {
+            trace.pc = pc;
+        }
+    }
+
+    /// Os acessos registrados, do mais antigo ao mais recente.
+    pub fn io_trace(&self) -> Vec<IoAccess> {
+        self.trace
+            .as_ref()
+            .map(|trace| trace.entries.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn record(&mut self, kind: AccessKind, width: u8, offset: u32, value: u32) {
+        let Some(trace) = self.trace.as_mut() else {
+            return;
+        };
+        if trace.entries.len() == trace.capacity {
+            trace.entries.pop_front();
+        }
+        let pc = trace.pc;
+        trace.entries.push_back(IoAccess {
+            pc,
+            offset,
+            value,
+            kind,
+            width,
+        });
     }
 
     pub const fn unhandled_reads(&self) -> u64 {
@@ -119,7 +170,9 @@ impl Bus {
             ]);
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
-            return self.load_io32(offset, physical);
+            let value = self.load_io32(offset, physical);
+            self.record(AccessKind::Read, 4, offset, value);
+            return value;
         }
         if memory::REGION_EXPANSION_1.contains(physical).is_some()
             || memory::REGION_EXPANSION_2.contains(physical).is_some()
@@ -149,7 +202,9 @@ impl Bus {
             return u16::from_le_bytes([self.scratchpad[i], self.scratchpad[i + 1]]);
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
-            return self.load_io16(offset, physical);
+            let value = self.load_io16(offset, physical);
+            self.record(AccessKind::Read, 2, offset, value as u32);
+            return value;
         }
         if memory::REGION_EXPANSION_1.contains(physical).is_some()
             || memory::REGION_EXPANSION_2.contains(physical).is_some()
@@ -174,7 +229,9 @@ impl Bus {
             return self.scratchpad[offset as usize];
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
-            return self.load_io8(offset, physical);
+            let value = self.load_io8(offset, physical);
+            self.record(AccessKind::Read, 1, offset, value as u32);
+            return value;
         }
         if memory::REGION_EXPANSION_1.contains(physical).is_some()
             || memory::REGION_EXPANSION_2.contains(physical).is_some()
@@ -201,6 +258,7 @@ impl Bus {
             return;
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
+            self.record(AccessKind::Write, 4, offset, value);
             self.store_io32(offset, physical, value);
             return;
         }
@@ -242,6 +300,7 @@ impl Bus {
             return;
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
+            self.record(AccessKind::Write, 2, offset, source);
             self.store_io16(offset, physical, source);
             return;
         }
@@ -270,6 +329,7 @@ impl Bus {
             return;
         }
         if let Some(offset) = memory::REGION_IO.contains(physical) {
+            self.record(AccessKind::Write, 1, offset, source);
             self.store_io8(offset, physical, source);
             return;
         }
@@ -750,4 +810,30 @@ mod tests {
         bus.store8(0x1F80_1800, 1);
         assert_eq!(bus.load8(0x1F80_1800) & 3, 1);
     }
+}
+
+/// Um acesso ao bloco de I/O registrado pelo rastro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoAccess {
+    /// Endereço da instrução que fez o acesso.
+    pub pc: u32,
+    /// Offset dentro de `0x1F80_1000`.
+    pub offset: u32,
+    pub value: u32,
+    pub kind: AccessKind,
+    /// Largura em bytes: 1, 2 ou 4.
+    pub width: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessKind {
+    Read,
+    Write,
+}
+
+/// Buffer circular do rastro de I/O.
+struct IoTrace {
+    entries: VecDeque<IoAccess>,
+    capacity: usize,
+    pc: u32,
 }

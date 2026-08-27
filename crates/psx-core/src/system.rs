@@ -131,6 +131,7 @@ impl System {
 
         while self.cycle_debt > 0 {
             self.capture_tty();
+            self.bus.set_trace_pc(self.cpu.pc());
             let cycles = self.cpu.step(&mut self.bus);
             self.cycle_debt -= cycles as i64;
             spent += cycles as u64;
@@ -211,6 +212,11 @@ impl System {
         if byte != 0 {
             self.tty.push(byte as char);
         }
+    }
+
+    /// Liga o rastro dos últimos acessos ao bloco de I/O.
+    pub fn start_io_trace(&mut self, capacity: usize) {
+        self.bus.start_io_trace(capacity);
     }
 
     /// Texto emitido pelo programa via `putchar` desde a última coleta.
