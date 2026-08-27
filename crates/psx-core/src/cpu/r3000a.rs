@@ -317,10 +317,11 @@ impl Cpu {
             0x0F => self.set_reg(instruction.rt(), instruction.imm() << 16),
 
             0x10 => self.execute_cop0(instruction),
-            0x11 | 0x13 => {
-                // O PSX não tem COP1 (FPU) nem COP3.
-                self.raise(Exception::CoprocessorUnusable);
-            }
+            // O PSX não tem COP1 (FPU) nem COP3. Estando **habilitados** em
+            // `SR`, porém, o hardware não reclama: a instrução simplesmente não
+            // faz nada. A exceção só sai quando o coprocessador está desligado.
+            0x11 => self.execute_missing_coprocessor(1),
+            0x13 => self.execute_missing_coprocessor(3),
             0x12 => self.execute_cop2(instruction),
 
             0x20 => self.op_load(instruction, bus, LoadWidth::Byte, true),
@@ -337,11 +338,25 @@ impl Cpu {
             0x2B => self.op_store(instruction, bus, LoadWidth::Word),
             0x2E => self.op_swr(instruction, bus),
 
-            0x32 => self.op_lwc2(instruction, bus),
-            0x3A => self.op_swc2(instruction, bus),
-            0x30 | 0x31 | 0x33 | 0x38 | 0x39 | 0x3B => {
-                self.raise(Exception::CoprocessorUnusable);
+            0x32 => {
+                if self.coprocessor_usable(2) {
+                    self.op_lwc2(instruction, bus);
+                } else {
+                    self.raise(Exception::CoprocessorUnusable);
+                }
             }
+            0x3A => {
+                if self.coprocessor_usable(2) {
+                    self.op_swc2(instruction, bus);
+                } else {
+                    self.raise(Exception::CoprocessorUnusable);
+                }
+            }
+            // `LWC`/`SWC` dos coprocessadores que não existem seguem a mesma
+            // regra: habilitado vira no-op, desligado gera a exceção.
+            0x30 | 0x38 => self.execute_missing_coprocessor(0),
+            0x31 | 0x39 => self.execute_missing_coprocessor(1),
+            0x33 | 0x3B => self.execute_missing_coprocessor(3),
 
             _ => self.raise(Exception::ReservedInstruction),
         }
@@ -527,6 +542,27 @@ impl Cpu {
         }
     }
 
+    /// `SR.CU0..CU3` (bits 28..31) — coprocessador habilitado.
+    ///
+    /// Só as instruções `LWC`/`SWC` consultam isto. A classe `COP0` (opcode
+    /// 0x10) responde mesmo com `CU0` zerado, porque o PSX vive em modo
+    /// kernel — por isso ela não passa por aqui.
+    fn coprocessor_usable(&self, number: u32) -> bool {
+        self.cop0.sr & (1 << (28 + number)) != 0
+    }
+
+    /// Acesso a um coprocessador que o PSX não tem (COP0 via `LWC`/`SWC`,
+    /// COP1 e COP3).
+    ///
+    /// Habilitado em `SR`, o hardware engole a instrução sem efeito; desligado,
+    /// gera `CoprocessorUnusable`. Levantar a exceção nos dois casos quebra
+    /// código que usa essas instruções como no-op.
+    fn execute_missing_coprocessor(&mut self, number: u32) {
+        if !self.coprocessor_usable(number) {
+            self.raise(Exception::CoprocessorUnusable);
+        }
+    }
+
     fn execute_cop0(&mut self, instruction: Instruction) {
         match instruction.cop_op() {
             // MFC0 — passa pelo load delay slot, como qualquer load.
@@ -538,14 +574,10 @@ impl Cpu {
                 let value = self.reg(instruction.rt());
                 self.cop0.write(instruction.rd(), value);
             }
-            0x10 => {
-                if instruction.funct() == 0x10 {
-                    self.cop0.return_from_exception();
-                } else {
-                    self.raise(Exception::ReservedInstruction);
-                }
-            }
-            _ => self.raise(Exception::ReservedInstruction),
+            0x10 if instruction.funct() == 0x10 => self.cop0.return_from_exception(),
+            // Opcode de COP0 que não existe é engolido pelo hardware, sem
+            // exceção — o decodificador do COP0 não valida o campo.
+            _ => {}
         }
     }
 

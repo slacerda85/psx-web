@@ -137,7 +137,9 @@ fn contains_in_order(actual: &[String], expected: &[String]) -> bool {
 fn normalise(text: &str) -> Vec<String> {
     text.replace('\r', "")
         .lines()
-        .map(|line| line.trim_end().to_string())
+        // Alguns logs de referência foram capturados com um prefixo "% " por
+        // linha; ele não faz parte do que o teste imprime.
+        .map(|line| line.trim_end().trim_start_matches("% ").to_string())
         .skip_while(|line| line.is_empty())
         .collect::<Vec<_>>()
         .into_iter()
