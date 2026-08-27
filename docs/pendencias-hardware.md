@@ -58,8 +58,8 @@ levou às correções de GTE, SIO e DMA: rodar, ler a diferença, isolar.
 ## A trava do Xenogears
 
 O jogo carrega, executa 299 setores de código próprio e entra num laço
- infinito, com todos os contadores de diagnóstico em
-zero. Não é funcionalidade faltando.
+`Pause → Setloc → ReadN` infinito, com todos os contadores de
+diagnóstico em zero. Não é funcionalidade faltando.
 
 O que já foi medido e **descartado**:
 
@@ -69,9 +69,9 @@ O que já foi medido e **descartado**:
 - Não é o fim do disco nem o gate de acknowledge do drive: instrumentados,
   nenhum dos dois é atingido durante a trava.
 
-O que ficou sem explicação: o contador de  **não expira**
-durante a trava, embora o drive esteja em  e o jogo espere mais
-ciclos do que o período de um setor. Medindo do  até o , a
+O que ficou sem explicação: o contador de `advance_read` **não expira**
+durante a trava, embora o drive esteja em `Reading` e o jogo espere mais
+ciclos do que o período de um setor. Medindo do `ReadN` até o `Pause`, a
 espera acompanha a latência que configuramos mais ~331 ciclos, seja qual for o
 valor — como se o jogo reagisse ao nosso timing em vez de a um prazo fixo.
 Essa contradição é o fio a puxar na próxima sessão.
