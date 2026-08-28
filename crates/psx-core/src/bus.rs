@@ -450,7 +450,7 @@ impl Bus {
                 byte * 0x0101
             }
             0xC00..=0xFFF => self.spu.read(offset - 0xC00),
-            _ => self.unhandled_read(address) as u16,
+            _ => self.load_io_wide(offset, address) as u16,
         }
     }
 
@@ -459,7 +459,7 @@ impl Bus {
             0x040..=0x04F => self.sio.read(offset) as u8,
             0x800..=0x803 => self.cdrom.read(offset - 0x800),
             0xC00..=0xFFF => self.spu.read(offset - 0xC00) as u8,
-            _ => self.unhandled_read(address) as u8,
+            _ => self.load_io_wide(offset, address) as u8,
         }
     }
 
@@ -495,6 +495,18 @@ impl Bus {
     /// O periférico recebe a palavra inteira do CPU, alinhada: é o que o
     /// console faz, e é por isso que escrever um byte em `DMA0_ADDR` grava o
     /// endereço completo em vez de um byte solto.
+    /// Leitura estreita de um periférico de 32 bits.
+    ///
+    /// O periférico entrega sempre a palavra inteira; o barramento é quem
+    /// recorta o pedaço endereçado. Sem isso, ler meia palavra de um registrador
+    /// de 32 caía em "sem mapeamento" e devolvia barramento flutuante — um jogo
+    /// que consulta a metade alta do `DICR` para saber se o DMA terminou via
+    /// todos os bits em um.
+    fn load_io_wide(&mut self, offset: u32, address: u32) -> u32 {
+        let word = self.load_io32(offset & !3, address & !3);
+        word >> ((offset & 3) * 8)
+    }
+
     fn store_io_wide(&mut self, offset: u32, address: u32, source: u32) {
         self.store_io32(offset & !3, address & !3, source);
     }

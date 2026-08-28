@@ -76,6 +76,13 @@ pub struct Mdec {
     expecting: Expecting,
     /// Palavras ainda esperadas do comando corrente.
     remaining: u32,
+    /// Algum comando já passou por aqui desde o reset.
+    ///
+    /// O campo de palavras restantes do `MDEC_STATUS` só ganha sentido depois
+    /// do primeiro comando: num MDEC recém-ligado o console reporta 0x0000
+    /// (`cpu/io-access-bitwidth`), e depois de um comando terminar reporta
+    /// 0xFFFF, que é "nenhuma" menos um (`mdec/step-by-step-log`).
+    command_seen: bool,
     /// Palavras recebidas do comando corrente.
     received: Vec<u32>,
 
@@ -108,6 +115,7 @@ impl Mdec {
         Self {
             expecting: Expecting::Command,
             remaining: 0,
+            command_seen: false,
             received: Vec::new(),
             quant_luma: [0; BLOCK],
             quant_chroma: [0; BLOCK],
@@ -148,7 +156,11 @@ impl Mdec {
         // quando não há nenhuma: o console reporta 0xFFFF em repouso, como o
         // `mdec/step-by-step-log` mostra na última leitura (0x8604FFFF).
         // Reportar zero ali faz o software concluir que ainda falta uma palavra.
-        status |= self.remaining.wrapping_sub(1) & 0xFFFF;
+        status |= if self.command_seen {
+            self.remaining.wrapping_sub(1) & 0xFFFF
+        } else {
+            0
+        };
 
         // Bits 16..18: bloco corrente. Sem modelar o pipeline interno, o valor
         // só precisa ser estável.
@@ -236,6 +248,7 @@ impl Mdec {
         self.signed = value & (1 << 26) != 0;
         self.mask_bit = value & (1 << 25) != 0;
         self.received.clear();
+        self.command_seen = true;
 
         match value >> 29 {
             // Decodificar macrobloco(s): o parâmetro é o tamanho em palavras.

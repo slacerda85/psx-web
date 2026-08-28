@@ -171,6 +171,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         d.bus_unhandled_reads,
         d.bus_unhandled_writes
     );
+    if d.bus_unhandled_reads + d.bus_unhandled_writes > 0 {
+        println!(
+            "  último acesso sem mapeamento: {:#010X}",
+            system.bus().last_unhandled_address()
+        );
+    }
     Ok(())
 }
 
