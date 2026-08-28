@@ -258,7 +258,19 @@ impl System {
     /// O core não abre arquivos: quem localiza o binário que a folha
     /// referencia é o embedder, que é quem tem sistema de arquivos.
     pub fn load_disc_with_cue(&mut self, cue: &str, image: Vec<u8>) -> Result<(), PsxError> {
-        let disc = Disc::from_cue(cue, image)?;
+        self.load_disc_with_cue_files(cue, vec![image])
+    }
+
+    /// Insere um disco descrito por um CUE com um ou mais arquivos.
+    ///
+    /// `images` segue a ordem dos `FILE` da folha, e pode vir mais curta —
+    /// uma faixa de áudio não carregada continua na TOC, sem setores.
+    pub fn load_disc_with_cue_files(
+        &mut self,
+        cue: &str,
+        images: Vec<Vec<u8>>,
+    ) -> Result<(), PsxError> {
+        let disc = Disc::from_cue_files(cue, images)?;
         self.bus.cdrom.insert_disc(disc);
         Ok(())
     }

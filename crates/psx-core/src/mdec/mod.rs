@@ -144,11 +144,11 @@ impl Mdec {
     pub fn status(&self) -> u32 {
         let mut status = 0u32;
 
-        // Bits 0..15: palavras restantes menos 1. Sem comando em andamento o
-        // console reporta zero, e não o 0xFFFF que a documentação sugere.
-        if self.remaining > 0 {
-            status |= (self.remaining - 1) & 0xFFFF;
-        }
+        // Bits 0..15: palavras restantes **menos um**, e o menos um vale também
+        // quando não há nenhuma: o console reporta 0xFFFF em repouso, como o
+        // `mdec/step-by-step-log` mostra na última leitura (0x8604FFFF).
+        // Reportar zero ali faz o software concluir que ainda falta uma palavra.
+        status |= self.remaining.wrapping_sub(1) & 0xFFFF;
 
         // Bits 16..18: bloco corrente. Sem modelar o pipeline interno, o valor
         // só precisa ser estável.

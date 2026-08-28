@@ -15,7 +15,10 @@
 //! ganhar uma só para salvar imagem de debug.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[path = "common/disc.rs"]
+mod disc_loader;
 
 use psx_core::sio::ButtonState;
 use psx_core::{Bios, System};
@@ -38,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut system = System::new(bios);
 
     if let Some(path) = &options.disc {
-        load_disc(&mut system, Path::new(path))?;
+        disc_loader::load(&mut system, Path::new(path))?;
         let disc = system.disc().expect("acabou de ser inserido");
         println!(
             "disco   : {:?}, {} setores, {} faixa(s)",
@@ -188,55 +191,6 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         }
     }
     Ok(options)
-}
-
-/// Insere um disco, aceitando tanto `.cue` quanto imagem crua.
-fn load_disc(system: &mut System, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
-    {
-        let cue = std::fs::read_to_string(path)?;
-        let binary = locate_binary(path, &cue)?;
-        system.load_disc_with_cue(&cue, std::fs::read(binary)?)?;
-    } else {
-        system.load_disc(std::fs::read(path)?)?;
-    }
-    Ok(())
-}
-
-/// Acha o binário de um CUE, tolerando que ele tenha sido renomeado.
-fn locate_binary(cue_path: &Path, cue: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let directory = cue_path.parent().unwrap_or(Path::new("."));
-
-    if let Some(declared) = cue
-        .lines()
-        .find(|line| line.trim_start().to_ascii_uppercase().starts_with("FILE"))
-        .and_then(|line| line.split('"').nth(1))
-    {
-        let candidate = directory.join(declared);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-
-    // Um .bin de jogo é sempre o maior arquivo da pasta.
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && !path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
-        })
-        .collect();
-    candidates.sort_by_key(|path| std::cmp::Reverse(path.metadata().map(|m| m.len()).unwrap_or(0)));
-
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("nenhum binário ao lado de {}", cue_path.display()).into())
 }
 
 fn count_non_black(pixels: &[u8], width: u32, height: u32) -> u64 {

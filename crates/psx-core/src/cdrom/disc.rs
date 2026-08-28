@@ -121,6 +121,8 @@ pub struct Track {
     pub sector_size: usize,
     /// Onde a faixa começa dentro do arquivo, em bytes.
     pub file_offset: u64,
+    /// Qual arquivo do CUE contém a faixa, na ordem em que os `FILE` aparecem.
+    pub file: usize,
 }
 
 /// Região gravada na área de licença do disco.
@@ -186,7 +188,8 @@ impl std::error::Error for DiscError {}
 /// controlador.
 #[derive(Clone)]
 pub struct Disc {
-    image: Vec<u8>,
+    /// Um por `FILE` do CUE, na ordem em que aparecem. Uma imagem crua tem um.
+    images: Vec<Vec<u8>>,
     tracks: Vec<Track>,
     region: DiscRegion,
 }
@@ -195,7 +198,8 @@ impl fmt::Debug for Disc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Sem o Vec: um Debug de 700 MB não ajuda ninguém.
         f.debug_struct("Disc")
-            .field("bytes", &self.image.len())
+            .field("arquivos", &self.images.len())
+            .field("bytes", &self.images.iter().map(Vec::len).sum::<usize>())
             .field("tracks", &self.tracks.len())
             .field("region", &self.region)
             .finish()
@@ -233,10 +237,11 @@ impl Disc {
             length,
             sector_size,
             file_offset: 0,
+            file: 0,
         }];
 
         let mut disc = Self {
-            image,
+            images: vec![image],
             tracks,
             region: DiscRegion::America,
         };
@@ -244,18 +249,59 @@ impl Disc {
         Ok(disc)
     }
 
+    /// Os arquivos que uma folha CUE referencia, na ordem em que aparecem.
+    ///
+    /// O core não abre arquivos: devolve os nomes para quem tem sistema de
+    /// arquivos resolver, e recebe os bytes de volta em [`Self::from_cue_files`].
+    pub fn cue_files(cue: &str) -> Vec<String> {
+        cue.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if !line.to_ascii_uppercase().starts_with("FILE") {
+                    return None;
+                }
+                // O nome vem entre aspas; sem elas, é o segundo token.
+                match (line.find('"'), line.rfind('"')) {
+                    (Some(first), Some(last)) if last > first => {
+                        Some(line[first + 1..last].to_string())
+                    }
+                    _ => line.split_whitespace().nth(1).map(str::to_string),
+                }
+            })
+            .collect()
+    }
+
     /// Interpreta uma folha CUE junto do binário que ela referencia.
     ///
-    /// Só o caso de um único arquivo é suportado, que é o formato em que
-    /// praticamente todo jogo de PSX circula. CUEs multi-arquivo devolvem as
-    /// faixas apontando para o mesmo binário, o que estaria errado — por isso
-    /// um `FILE` extra é recusado em vez de aceito em silêncio.
+    /// Atalho para o caso de arquivo único, que é como quase todo jogo de PSX
+    /// circula.
     pub fn from_cue(cue: &str, image: Vec<u8>) -> Result<Self, DiscError> {
-        if image.is_empty() {
+        Self::from_cue_files(cue, vec![image])
+    }
+
+    /// Interpreta uma folha CUE com um ou mais arquivos.
+    ///
+    /// `images` segue a ordem dos `FILE` da folha. Pode vir mais curta: um
+    /// arquivo ausente entra como vazio, e a faixa correspondente aparece na
+    /// TOC mas não tem setores para ler. É o que se quer quando só a faixa de
+    /// dados importa e a de áudio não foi carregada — a TOC continua certa,
+    /// que é o que o jogo consulta.
+    pub fn from_cue_files(cue: &str, mut images: Vec<Vec<u8>>) -> Result<Self, DiscError> {
+        if images.first().map_or(true, Vec::is_empty) {
             return Err(DiscError::Empty);
         }
 
-        let mut tracks: Vec<Track> = Vec::new();
+        /// Uma faixa como a folha a descreve, antes de virar posição no disco.
+        struct Parsed {
+            number: u8,
+            kind: TrackKind,
+            sector_size: usize,
+            file: usize,
+            /// Setor do `INDEX 01` dentro do arquivo.
+            offset: u32,
+        }
+
+        let mut parsed: Vec<Parsed> = Vec::new();
         let mut files_seen = 0usize;
         let mut pending: Option<(u8, TrackKind, usize)> = None;
 
@@ -271,15 +317,7 @@ impl Disc {
             };
 
             match keyword.to_ascii_uppercase().as_str() {
-                "FILE" => {
-                    files_seen += 1;
-                    if files_seen > 1 {
-                        return Err(DiscError::CueSyntax {
-                            line: number,
-                            text: "CUE com múltiplos FILE ainda não é suportado".into(),
-                        });
-                    }
-                }
+                "FILE" => files_seen += 1,
                 "TRACK" => {
                     let track_number = parts
                         .next()
@@ -297,7 +335,8 @@ impl Disc {
                     } else {
                         TrackKind::Data
                     };
-                    // O tamanho do setor vem depois da barra: MODE1/2352.
+                    // O tamanho do setor vem depois da barra: MODE1/2352. Uma
+                    // faixa de áudio não traz barra e é sempre crua.
                     let sector_size = mode
                         .rsplit('/')
                         .next()
@@ -322,16 +361,13 @@ impl Disc {
                         line: number,
                         text: line.into(),
                     })?;
-                    // No CUE o MSF é posição dentro do arquivo, sem pregap.
-                    let start = msf.to_absolute();
-                    tracks.push(Track {
+                    parsed.push(Parsed {
                         number: track_number,
                         kind,
-                        start_lba: start,
-                        // Corrigido no fecho, quando sabemos onde termina.
-                        length: 0,
                         sector_size,
-                        file_offset: start as u64 * sector_size as u64,
+                        file: files_seen - 1,
+                        // No CUE o MSF é posição dentro do arquivo, sem pregap.
+                        offset: msf.to_absolute(),
                     });
                     pending = None;
                 }
@@ -341,23 +377,54 @@ impl Disc {
             }
         }
 
-        if tracks.is_empty() {
+        if parsed.is_empty() {
             return Err(DiscError::CueWithoutTracks);
         }
 
-        // Cada faixa vai até o começo da seguinte; a última até o fim do
-        // arquivo.
+        if images.len() < files_seen {
+            images.resize(files_seen, Vec::new());
+        }
+
+        // Cada arquivo continua de onde o anterior parou: o MSF do CUE é
+        // posição dentro do arquivo, e o LBA do disco é acumulado.
+        let mut base = vec![0u32; images.len()];
+        for file in 1..images.len() {
+            let sector_size = parsed
+                .iter()
+                .find(|track| track.file == file - 1)
+                .map_or(SECTOR_RAW, |track| track.sector_size);
+            base[file] = base[file - 1] + (images[file - 1].len() / sector_size) as u32;
+        }
+
+        let mut tracks: Vec<Track> = parsed
+            .iter()
+            .map(|track| Track {
+                number: track.number,
+                kind: track.kind,
+                start_lba: base.get(track.file).copied().unwrap_or(0) + track.offset,
+                // Corrigido logo abaixo, quando sabemos onde cada uma termina.
+                length: 0,
+                sector_size: track.sector_size,
+                file_offset: u64::from(track.offset) * track.sector_size as u64,
+                file: track.file,
+            })
+            .collect();
+
         for index in 0..tracks.len() {
-            let start = tracks[index].start_lba;
-            let end = match tracks.get(index + 1) {
-                Some(next) => next.start_lba,
-                None => (image.len() / tracks[index].sector_size) as u32,
-            };
-            tracks[index].length = end.saturating_sub(start);
+            let file = tracks[index].file;
+            let next_in_same_file = tracks
+                .get(index + 1)
+                .filter(|next| next.file == file)
+                .map(|next| next.start_lba);
+            let end = next_in_same_file.unwrap_or_else(|| {
+                let sectors = (images[file].len() / tracks[index].sector_size) as u32;
+                base.get(file).copied().unwrap_or(0) + sectors
+            });
+            tracks[index].length = end.saturating_sub(tracks[index].start_lba);
         }
 
         let mut disc = Self {
-            image,
+            images,
             tracks,
             region: DiscRegion::America,
         };
@@ -414,10 +481,10 @@ impl Disc {
         let offset = self.byte_offset(track, lba);
 
         if track.sector_size == SECTOR_USER {
-            return self.image.get(offset..offset + SECTOR_USER);
+            return self.bytes(track).get(offset..offset + SECTOR_USER);
         }
 
-        let sector = self.image.get(offset..offset + SECTOR_RAW)?;
+        let sector = self.bytes(track).get(offset..offset + SECTOR_RAW)?;
         let data_offset = match sector[MODE_BYTE_OFFSET] {
             2 => MODE2_FORM1_DATA_OFFSET,
             _ => MODE1_DATA_OFFSET,
@@ -434,7 +501,7 @@ impl Disc {
             return None;
         }
         let offset = self.byte_offset(track, lba) + SYNC_PATTERN.len();
-        self.image
+        self.bytes(track)
             .get(offset..offset + (SECTOR_RAW - SYNC_PATTERN.len()))
     }
 
@@ -449,11 +516,19 @@ impl Disc {
             return None;
         }
         let offset = self.byte_offset(track, lba);
-        let sector = self.image.get(offset..offset + SECTOR_RAW)?;
+        let sector = self.bytes(track).get(offset..offset + SECTOR_RAW)?;
         if sector[MODE_BYTE_OFFSET] != 2 {
             return None;
         }
         Some([sector[16], sector[17], sector[18], sector[19]])
+    }
+
+    /// Os bytes do arquivo que contém a faixa.
+    ///
+    /// Um arquivo declarado no CUE mas não carregado vira uma fatia vazia: a
+    /// faixa continua na TOC e qualquer leitura dela devolve `None`.
+    fn bytes(&self, track: &Track) -> &[u8] {
+        self.images.get(track.file).map_or(&[], Vec::as_slice)
     }
 
     fn byte_offset(&self, track: &Track, lba: u32) -> usize {
@@ -627,7 +702,38 @@ mod tests {
     }
 
     #[test]
-    fn a_cue_with_multiple_files_is_rejected_instead_of_read_wrong() {
+    fn a_cue_with_two_files_lays_the_tracks_out_in_sequence() {
+        let cue = concat!(
+            "FILE \"a.bin\" BINARY\n",
+            "  TRACK 01 MODE2/2352\n",
+            "    INDEX 01 00:00:00\n",
+            "FILE \"b.bin\" BINARY\n",
+            "  TRACK 02 AUDIO\n",
+            "    INDEX 00 00:00:00\n",
+            "    INDEX 01 00:02:00\n"
+        );
+        let disc = Disc::from_cue_files(
+            cue,
+            vec![vec![0u8; SECTOR_RAW * 10], vec![0u8; SECTOR_RAW * 8]],
+        )
+        .unwrap();
+
+        let tracks = disc.tracks();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].start_lba, 0);
+        assert_eq!(tracks[0].length, 10, "a primeira vai até o fim do arquivo");
+        assert_eq!(tracks[0].file, 0);
+
+        // A segunda continua de onde a primeira parou, e o INDEX 01 dela está
+        // 150 setores adentro do próprio arquivo.
+        assert_eq!(tracks[1].file, 1);
+        assert_eq!(tracks[1].kind, TrackKind::Audio);
+        assert_eq!(tracks[1].start_lba, 10 + 150);
+        assert_eq!(tracks[1].file_offset, 150 * SECTOR_RAW as u64);
+    }
+
+    #[test]
+    fn a_file_that_was_not_loaded_still_appears_in_the_toc() {
         let cue = concat!(
             "FILE \"a.bin\" BINARY\n",
             "  TRACK 01 MODE2/2352\n",
@@ -636,8 +742,28 @@ mod tests {
             "  TRACK 02 AUDIO\n",
             "    INDEX 01 00:00:00\n"
         );
-        let error = Disc::from_cue(cue, vec![0u8; SECTOR_RAW * 4]).unwrap_err();
-        assert!(matches!(error, DiscError::CueSyntax { line: 4, .. }));
+        // Só a faixa de dados foi carregada.
+        let disc = Disc::from_cue_files(cue, vec![vec![0u8; SECTOR_RAW * 10]]).unwrap();
+
+        assert_eq!(disc.track_range(), (1, 2), "a TOC declara as duas");
+        assert_eq!(disc.tracks()[1].length, 0, "sem bytes, sem setores");
+        assert!(disc.read_user_data(10).is_none());
+    }
+
+    #[test]
+    fn cue_files_lists_the_declared_names_in_order() {
+        let cue = concat!(
+            "FILE \"jogo (Track 1).bin\" BINARY\n",
+            "  TRACK 01 MODE2/2352\n",
+            "    INDEX 01 00:00:00\n",
+            "FILE \"jogo (Track 2).bin\" BINARY\n",
+            "  TRACK 02 AUDIO\n",
+            "    INDEX 01 00:00:00\n"
+        );
+        assert_eq!(
+            Disc::cue_files(cue),
+            vec!["jogo (Track 1).bin", "jogo (Track 2).bin"]
+        );
     }
 
     #[test]

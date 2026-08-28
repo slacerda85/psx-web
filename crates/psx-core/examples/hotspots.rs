@@ -10,7 +10,10 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[path = "common/disc.rs"]
+mod disc_loader;
 
 use psx_core::{Bios, System};
 
@@ -54,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut system = System::new(Bios::new(std::fs::read(&bios_path)?)?);
     if let Some(path) = &disc_path {
-        load_disc(&mut system, Path::new(path))?;
+        disc_loader::load(&mut system, Path::new(path))?;
     }
     if let Some(address) = watch {
         // O rastro de I/O é quem guarda o PC corrente; ligá-lo com capacidade
@@ -227,47 +230,4 @@ fn decode(word: u32) -> String {
         0x2B => format!("sw     r{rt}, {imm} off r{rs}"),
         _ => format!("op {op:#04X}"),
     }
-}
-
-fn load_disc(system: &mut System, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
-    {
-        let cue = std::fs::read_to_string(path)?;
-        let binary = locate_binary(path, &cue)?;
-        system.load_disc_with_cue(&cue, std::fs::read(binary)?)?;
-    } else {
-        system.load_disc(std::fs::read(path)?)?;
-    }
-    Ok(())
-}
-
-fn locate_binary(cue_path: &Path, cue: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let directory = cue_path.parent().unwrap_or(Path::new("."));
-    if let Some(declared) = cue
-        .lines()
-        .find(|line| line.trim_start().to_ascii_uppercase().starts_with("FILE"))
-        .and_then(|line| line.split('"').nth(1))
-    {
-        let candidate = directory.join(declared);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && !path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("cue"))
-        })
-        .collect();
-    candidates.sort_by_key(|path| std::cmp::Reverse(path.metadata().map(|m| m.len()).unwrap_or(0)));
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("nenhum binário ao lado de {}", cue_path.display()).into())
 }

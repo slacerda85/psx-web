@@ -12,7 +12,10 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[path = "common/disc.rs"]
+mod disc_loader;
 
 use psx_core::bus::AccessKind;
 use psx_core::{Bios, System};
@@ -42,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut system = System::new(Bios::new(std::fs::read(&bios_path)?)?);
     if let Some(path) = &disc_path {
-        load_disc(&mut system, Path::new(path))?;
+        disc_loader::load(&mut system, Path::new(path))?;
     }
     system.start_io_trace(capacity);
 
@@ -125,39 +128,43 @@ fn register_name(offset: u32) -> String {
             };
             return format!("DMA{channel}_{which}");
         }
-        0xC00..=0xFFF => "SPU",
+        // Dentro da SPU o offset importa: 24 leituras seguidas de "SPU" não
+        // dizem nada, mas "SPU voz 3 ADSRVOL" diz tudo.
+        0xC00..=0xFFF => {
+            let inner = offset - 0xC00;
+            if inner < 0x180 {
+                let voice = inner / 0x10;
+                let which = match (inner % 0x10) / 2 {
+                    0 => "VOLL",
+                    1 => "VOLR",
+                    2 => "PITCH",
+                    3 => "ADDR",
+                    4 => "ADSR_LO",
+                    5 => "ADSR_HI",
+                    6 => "ADSRVOL",
+                    _ => "REPEAT",
+                };
+                return format!("SPU v{voice:02}.{which}");
+            }
+            let which = match inner {
+                0x180 | 0x182 => "MVOL",
+                0x188 | 0x18A => "KON",
+                0x18C | 0x18E => "KOFF",
+                0x190 => "PMON",
+                0x194 => "NON",
+                0x198 => "EON",
+                0x19C | 0x19E => "ENDX",
+                0x1A4 => "IRQ_ADDR",
+                0x1A6 => "XFER_ADDR",
+                0x1A8 => "XFER_FIFO",
+                0x1AA => "SPUCNT",
+                0x1AE => "SPUSTAT",
+                0x1B0 | 0x1B2 => "CD_VOL",
+                _ => return format!("SPU+{inner:03X}"),
+            };
+            return format!("SPU {which}");
+        }
         _ => return format!("{:#06X}", 0x1F80_1000 + offset),
     };
     name.to_string()
-}
-
-fn load_disc(system: &mut System, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
-    {
-        let cue = std::fs::read_to_string(path)?;
-        let directory = path.parent().unwrap_or(Path::new("."));
-        let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|candidate| {
-                candidate.is_file()
-                    && !candidate
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
-            })
-            .collect();
-        candidates.sort_by_key(|candidate| {
-            std::cmp::Reverse(candidate.metadata().map(|meta| meta.len()).unwrap_or(0))
-        });
-        let binary = candidates
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("nenhum binário ao lado de {}", path.display()))?;
-        system.load_disc_with_cue(&cue, std::fs::read(binary)?)?;
-    } else {
-        system.load_disc(std::fs::read(path)?)?;
-    }
-    Ok(())
 }

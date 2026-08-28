@@ -18,6 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "common/disc.rs"]
+mod disc_loader;
+
 use psx_core::{Bios, System};
 
 /// Ciclos gastos deixando o kernel pronto antes de injetar o executável.
@@ -102,7 +105,7 @@ fn run(
     let mut system = System::new(Bios::new(bios.to_vec())?);
     // Os testes de CD-ROM param logo no começo pedindo um disco.
     if let Some(path) = disc {
-        load_disc(&mut system, Path::new(path))?;
+        disc_loader::load(&mut system, Path::new(path))?;
     }
     // O kernel precisa estar de pé antes do sideload: os testes chamam funções
     // do BIOS para imprimir.
@@ -231,38 +234,4 @@ fn parse_args() -> Result<Options, Box<dyn std::error::Error>> {
         }
     }
     Ok(options)
-}
-
-/// Insere um disco, aceitando `.cue` ou imagem crua.
-fn load_disc(system: &mut System, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
-    {
-        let cue = std::fs::read_to_string(path)?;
-        let directory = path.parent().unwrap_or(Path::new("."));
-        // O nome dentro da folha quase nunca sobrevive ao download: o binário
-        // é o maior arquivo ao lado dela.
-        let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|candidate| {
-                candidate.is_file()
-                    && !candidate
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
-            })
-            .collect();
-        candidates.sort_by_key(|candidate| {
-            std::cmp::Reverse(candidate.metadata().map(|meta| meta.len()).unwrap_or(0))
-        });
-        let binary = candidates
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("nenhum binário ao lado de {}", path.display()))?;
-        system.load_disc_with_cue(&cue, std::fs::read(binary)?)?;
-    } else {
-        system.load_disc(std::fs::read(path)?)?;
-    }
-    Ok(())
 }
