@@ -275,3 +275,45 @@ Oito hipóteses já foram testadas e descartadas para essa trava (tabela em
 Fase 2 — é voltar a medir, com o alvo declarado: **descobrir o que faz o laço
 principal do Guilty Gear, em `0x80066Dxx`, decidir pedir ou não pedir o
 payload.** Só 19 pedidos em 1500 frames, e quando pede, funciona.
+
+---
+
+## Registro de execução
+
+### Fase 1 (buffer de dois slots) — implementada e **revertida**
+
+Foi escrita por inteiro, com os três testes que o plano pedia, e os três
+passaram: o salto para o mais novo, a leitura sequencial sem perda quando o
+software acompanha, e o travamento do setor pelo `BFRD`.
+
+**Quebrou o boot.** Com o descarte ligado, o BIOS deixa de ler `SYSTEM.CNF`
+corretamente e cai no `cdrom:PSX.EXE;1` de fallback — nenhum dos quatro jogos
+carrega. Ele recolhe 8 dos 10 setores do boot e perde dois.
+
+O descarte é correto no console. O que falta aqui é o resto do relógio: as
+nossas latências de comando são médias, a ordenação das respostas é uma fila
+por tempo em vez das duas bandeiras do silício, e a velocidade da CPU é
+aproximada. Descartar setores fielmente dentro desse conjunto de aproximações
+destrói dado que o console real teria entregue.
+
+**Dependência descoberta:** o buffer de dois slots precisa do modelo de
+respostas por bandeira (§11 de [divergencias-do-console.md](divergencias-do-console.md))
+antes de ser seguro. A ordem certa é o inverso da que este plano propôs.
+
+### Fase 3 (MDEC) — não implementada, com motivo
+
+O `current_block` não tem como ser fiel na nossa arquitetura. O campo existe
+para o DMA1 saber **como reordenar** o bloco na RAM, e o nosso MDEC monta o
+macrobloco inteiro em `emit_color` antes de enfileirar a saída — o
+reordenamento que o campo serve para guiar já aconteceu. Reportar um índice
+variável seria decoração, não emulação.
+
+Implementá-lo de verdade significa emitir bloco a bloco e mover o
+reordenamento para o canal 1 do DMA. É refatoração real, e nenhum dos quatro
+jogos lê o campo.
+
+O bit 27 tem o mesmo problema em menor escala: a fonte diz que ele desce
+*"after reading the first some words"*, sem dizer quantas. Escolher um limiar
+seria inventar um número.
+
+Os dois continuam abertos, agora com o motivo registrado.

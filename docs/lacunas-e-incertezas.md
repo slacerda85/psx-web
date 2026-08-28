@@ -121,7 +121,7 @@ funcionar.
 **Impacto:** efeito ausente. O PSX-SPX documenta o algoritmo por inteiro, então
 é implementação, não pesquisa.
 
-### 2.4 Ruído: a fórmula do período
+### 2.4 Ruído: a fórmula do período — FECHADO
 
 **Estado:** `period = (0x8000 >> shift).max(1) * (4 + step)`.
 
@@ -132,7 +132,7 @@ contra outra implementação.
 **Como fechar:** comparar com o `spu` do ps1-tests, se houver caso que o
 exercite.
 
-### 2.5 O que a IRQ de endereço compara
+### 2.5 O que a IRQ de endereço compara — FECHADO
 
 **Estado:** comparamos o endereço do bloco corrente de cada voz com o
 registrador de IRQ, mascarado para o bloco de 8 bytes.
@@ -146,7 +146,7 @@ transferência por DMA para a SPU RAM. O rustation faz a checagem dentro de
 **Como fechar:** mover a checagem para os acessos à RAM e medir. É a hipótese
 mais provável e não foi testada.
 
-### 2.6 Quantos blocos o decodificador lê à frente
+### 2.6 Quantos blocos o decodificador lê à frente — FECHADO
 
 **Estado:** decodificamos um bloco por vez, quando o anterior acaba.
 
@@ -272,3 +272,25 @@ Um item entra aqui quando a alternativa seria escolher um comportamento sem
 base. Um item sai quando há fonte, medição contra o console, ou um teste do
 ps1-tests que o cubra — e aí a correção vai para o código com a referência no
 comentário.
+
+---
+
+## Fechados nesta passada
+
+### §2.4 — Ruído
+
+Substituído pelo algoritmo do PSX-SPX, "SPU Noise Generator": contador com
+sinal andando para baixo, paridade com o `xor 1` que impede o ponto fixo em
+zero, e recarga dupla porque com deslocamento grande o período fica menor que
+o passo. Testes: sequência determinística do LFSR e a recarga dupla.
+
+### §2.5 e §2.6 — IRQ de endereço da SPU
+
+Todo acesso à SPU RAM passa por `ram_read`/`ram_write`, e a checagem mora
+lá. Fonte: *"all voices are permanently reading data from SPU RAM (...) so even
+inaudible voices can trigger IRQs"* e *"Setting the IRQ address to
+0000h..01FFh will trigger IRQs on writes to the four capture buffers"*.
+
+A §2.6 some junto: a IRQ é na busca do bloco, então quantas amostras o
+decodificador lê à frente deixa de importar. Testes: voz lendo o bloco
+vigiado, captura, transferência manual e SPU desligada.
