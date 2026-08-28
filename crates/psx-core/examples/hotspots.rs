@@ -56,6 +56,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = &disc_path {
         load_disc(&mut system, Path::new(path))?;
     }
+    if let Some(address) = watch {
+        // O rastro de I/O é quem guarda o PC corrente; ligá-lo com capacidade
+        // mínima basta para o watchpoint saber quem escreveu.
+        system.start_io_trace(1);
+        system.bus_mut().watch_ram(address, 64);
+    }
 
     let mut histogram: HashMap<u32, u32> = HashMap::new();
     // Valores distintos vistos no endereço observado, na ordem em que apareceram.
@@ -74,6 +80,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(address) = watch {
+        let writes = system.bus().ram_watch();
+        println!("escritas em {address:#010X}: {}", writes.len());
+        for write in writes.iter().take(20) {
+            let kind = if write.width == 0 {
+                "dma".to_string()
+            } else {
+                format!("st{}", write.width * 8)
+            };
+            println!(
+                "  pc={:08X} {kind:>5} {:08X} <- {:08X}",
+                write.pc, write.address, write.value
+            );
+        }
         println!("mudanças em {address:#010X}: {}", watched.len());
         for &(frame, value) in watched.iter().take(12) {
             println!("  frame {frame:5}: {value:#010X}");

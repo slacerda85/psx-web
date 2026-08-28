@@ -24,6 +24,21 @@ use crate::timers::Timers;
 /// disso significa que ela está revisitando endereços.
 const MAX_LINKED_LIST_NODES: u32 = (2 * 1024 * 1024) / 4;
 
+/// Uma escrita registrada no endereço vigiado. Largura 0 significa DMA.
+#[derive(Debug, Clone, Copy)]
+pub struct RamWrite {
+    pub pc: u32,
+    pub address: u32,
+    pub value: u32,
+    pub width: u8,
+}
+
+struct RamWatch {
+    address: u32,
+    writes: Vec<RamWrite>,
+    capacity: usize,
+}
+
 /// O barramento e tudo que está pendurado nele.
 pub struct Bus {
     pub ram: Ram,
@@ -54,6 +69,12 @@ pub struct Bus {
     /// e ver quais são e o que devolvemos costuma bastar.
     trace: Option<IoTrace>,
 
+    /// Endereço de RAM vigiado e quem escreveu nele.
+    ///
+    /// Quando um jogo passa a executar lixo, a pergunta é quem sujou a
+    /// memória — e o `PC` de cada escrita responde direto.
+    watch: Option<RamWatch>,
+
     /// Acessos a endereços sem mapeamento, para diagnóstico.
     unhandled_reads: u64,
     unhandled_writes: u64,
@@ -75,6 +96,7 @@ impl Bus {
             sio: Sio::new(),
             mdec: Mdec::new(),
             trace: None,
+            watch: None,
             memory_control: [0; 9],
             ram_size: 0x0000_0B88,
             cache_control: 0,
@@ -90,6 +112,43 @@ impl Bus {
             entries: VecDeque::with_capacity(capacity),
             capacity,
             pc: 0,
+        });
+    }
+
+    /// Vigia uma palavra da RAM, guardando quem escreve nela.
+    ///
+    /// O endereço é físico e alinhado; qualquer escrita que toque a palavra é
+    /// registrada, inclusive as do DMA.
+    pub fn watch_ram(&mut self, address: u32, capacity: usize) {
+        self.watch = Some(RamWatch {
+            address: memory::physical(address) & !3,
+            writes: Vec::new(),
+            capacity,
+        });
+    }
+
+    /// As escritas registradas no endereço vigiado.
+    pub fn ram_watch(&self) -> &[RamWrite] {
+        self.watch
+            .as_ref()
+            .map(|w| w.writes.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Registra uma escrita na RAM, se ela cair no endereço vigiado.
+    fn note_write(&mut self, physical: u32, value: u32, width: u8) {
+        let pc = self.trace.as_ref().map_or(0, |trace| trace.pc);
+        let Some(watch) = self.watch.as_mut() else {
+            return;
+        };
+        if physical & !3 != watch.address || watch.writes.len() >= watch.capacity {
+            return;
+        }
+        watch.writes.push(RamWrite {
+            pc,
+            address: physical,
+            value,
+            width,
         });
     }
 
@@ -249,6 +308,7 @@ impl Bus {
         let physical = memory::physical(address);
 
         if let Some(offset) = memory::REGION_RAM.contains(physical) {
+            self.note_write(physical, value, 4);
             self.ram.write32(offset, value);
             return;
         }
@@ -291,6 +351,7 @@ impl Bus {
         let physical = memory::physical(address);
 
         if let Some(offset) = memory::REGION_RAM.contains(physical) {
+            self.note_write(physical, u32::from(value), 2);
             self.ram.write16(offset, value);
             return;
         }
@@ -321,6 +382,7 @@ impl Bus {
         let physical = memory::physical(address);
 
         if let Some(offset) = memory::REGION_RAM.contains(physical) {
+            self.note_write(physical, u32::from(value), 1);
             self.ram.write8(offset, value);
             return;
         }
@@ -531,6 +593,7 @@ impl Bus {
             } else {
                 masked.wrapping_sub(4) & 0x001F_FFFF
             };
+            self.note_write(masked, word, 0);
             self.ram.write32(masked, word);
             address = address.wrapping_sub(4);
             remaining -= 1;
@@ -543,13 +606,22 @@ impl Bus {
         let mut address = channel.base;
         let mut remaining = channel.transfer_size().unwrap_or(0);
 
-        // `SyncMode 1` é dirigido pelo pedido do dispositivo, e não pela
-        // contagem de blocos: o canal move dados enquanto o periférico os
-        // oferecer. O MDEC entrega exatamente o macrobloco que decodificou, e
-        // tanto os jogos quanto o ps1-tests contam com isso — o teste chega a
-        // programar a contagem em zero e ainda assim recebe o bloco inteiro.
+        // `SyncMode 1` é dirigido pelo pedido do dispositivo, mas **dentro** do
+        // que o software programou. O ps1-tests programa a contagem em zero e
+        // ainda assim recebe o macrobloco inteiro, então zero significa "o que
+        // o MDEC tiver".
+        //
+        // Ignorar a contagem sempre, como fazíamos, deixa a transferência
+        // passar do buffer do jogo: no Gran Turismo ela dava a volta nos 2 MB
+        // e apagava o vetor de exceção em 0x80, e a partir daí a CPU executava
+        // NOPs a cada interrupção.
         if port == Port::MdecOut && channel.sync() == Sync::Request {
-            remaining = self.mdec.pending_output() as u32;
+            let available = self.mdec.pending_output() as u32;
+            remaining = if remaining == 0 {
+                available
+            } else {
+                remaining.min(available)
+            };
         }
 
         while remaining > 0 {
@@ -584,6 +656,7 @@ impl Bus {
                         Port::MdecOut => self.mdec.dma_read(),
                         _ => 0,
                     };
+                    self.note_write(masked, word, 0);
                     self.ram.write32(masked, word);
                 }
             }
