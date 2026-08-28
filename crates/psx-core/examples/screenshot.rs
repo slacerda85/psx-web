@@ -59,11 +59,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(name) => 1 << button_bit(name)?,
     };
 
+    // Estatística do áudio: pico, RMS e quantos quadros saturam. Um jogo mudo
+    // e um jogo cuspindo ruído se parecem no framebuffer, mas não aqui.
+    let mut audio_peak = 0i32;
+    let mut audio_energy = 0f64;
+    let mut audio_frames = 0u64;
+    let mut audio_clipped = 0u64;
+    let mut samples = vec![0i16; 4096];
+
     for frame in 0..options.frames {
         if held != 0 && frame >= options.frames / 2 {
             system.set_buttons(0, ButtonState::from_pressed_mask(held));
         }
         system.run_frame();
+        let written = system.drain_audio(&mut samples);
+        for &sample in &samples[..written] {
+            let value = i32::from(sample);
+            audio_peak = audio_peak.max(value.abs());
+            audio_energy += (value as f64) * (value as f64);
+            if value.abs() >= 32_000 {
+                audio_clipped += 1;
+            }
+            audio_frames += 1;
+        }
     }
 
     // A VRAM inteira separa dois diagnósticos que a janela de display confunde:
@@ -108,6 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diagnostics = system.diagnostics();
 
     println!("frames  : {}", options.frames);
+    println!(
+        "áudio   : {} amostras, pico={audio_peak}, rms={:.0}, saturadas={audio_clipped}",
+        audio_frames,
+        (audio_energy / audio_frames.max(1) as f64).sqrt()
+    );
     println!("resolução: {width}x{height}");
     println!(
         "desenhado: {non_black} de {total} pixels ({:.1}%)",

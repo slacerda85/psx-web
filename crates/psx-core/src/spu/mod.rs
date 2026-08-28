@@ -56,7 +56,7 @@ pub struct Spu {
     cd_queue: VecDeque<(i16, i16)>,
     /// Taxa do fluxo corrente do CD.
     cd_rate: u32,
-    /// Posição fracionária dentro de `cd_queue`, em 16 avos de amostra.
+    /// Posição fracionária dentro de `cd_queue`, em 1/65536 de amostra.
     cd_fraction: u32,
 
     /// Buffer circular de saída, estéreo intercalado (L, R, L, R, ...).
@@ -230,10 +230,15 @@ impl Spu {
         let Some(&frame) = self.cd_queue.front() else {
             return (0, 0);
         };
-        // Quantas amostras da fonte cabem numa da saída, em 16 avos.
-        self.cd_fraction += (self.cd_rate << 4) / SAMPLE_RATE;
-        while self.cd_fraction >= 16 {
-            self.cd_fraction -= 16;
+        // Quantas amostras da fonte cabem numa da saída, em 1/65536.
+        //
+        // A precisão importa: com 16 avos, um fluxo de 37800 Hz era consumido
+        // 5% devagar demais e um de 18900 Hz 12,5%. A fila enchia até o teto e
+        // passava a descartar blocos inteiros — o que se ouve como áudio
+        // acelerado e picotado.
+        self.cd_fraction += (self.cd_rate << 16) / SAMPLE_RATE;
+        while self.cd_fraction >= 1 << 16 {
+            self.cd_fraction -= 1 << 16;
             self.cd_queue.pop_front();
         }
         frame
@@ -633,19 +638,22 @@ mod tests {
     }
 
     #[test]
-    fn a_slower_cd_stream_is_consumed_more_slowly() {
-        let mut spu = unmuted();
-        spu.push_cd_audio(&[(1, 1); 100], 37_800);
-        let before = spu.cd_queue.len();
-        for _ in 0..50 {
-            spu.next_cd_frame();
+    fn a_slower_cd_stream_is_consumed_at_its_own_rate() {
+        for (rate, expected) in [(37_800u32, 857usize), (18_900, 428), (44_100, 1000)] {
+            let mut spu = unmuted();
+            spu.push_cd_audio(&[(1, 1); 1200], rate);
+            let before = spu.cd_queue.len();
+            for _ in 0..1000 {
+                spu.next_cd_frame();
+            }
+            let consumed = before - spu.cd_queue.len();
+            // Mil amostras de saída a 44100 Hz consomem rate/44.1 da fonte. Um
+            // erro de 1% aqui vira fila estourada e áudio picotado.
+            assert!(
+                consumed.abs_diff(expected) <= 2,
+                "fonte de {rate} Hz: consumiu {consumed}, esperado {expected}"
+            );
         }
-        let consumed = before - spu.cd_queue.len();
-        // 50 amostras de saída a 44100 consomem ~43 de um fluxo a 37800.
-        assert!(
-            (40..=46).contains(&consumed),
-            "consumiu {consumed} quadros, esperado perto de 43"
-        );
     }
 
     #[test]
