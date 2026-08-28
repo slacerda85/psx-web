@@ -31,12 +31,12 @@ serão resolvidos juntos, quando houver um scheduler que intercale DMA e CPU.
 | `timers` / `timer-dump` | Os contadores já batem exatamente; o que falha é o custo do DMA aparecer como zero |
 | `dma/chain-looping` | Cadeia auto-referente: o comportamento observável (não conclui, sem IRQ) já bate; sobra o custo em ciclos |
 
-## Subsistemas ausentes
+## Subsistemas incompletos
 
 | Teste | Falta |
 | --- | --- |
 | `mdec/4bit`, `mdec/8bit`, `mdec/step-by-step-log` | O MDEC existe e decodifica; ver abaixo |
-| `spu/memory-transfer` | Caminho de transferência da SPU RAM |
+| `spu/memory-transfer` | Restam os casos de timing de DMA; ver abaixo |
 
 ## MDEC — decodifica e transporta, com arredondamento residual
 
@@ -70,14 +70,13 @@ levou às correções de GTE, SIO e DMA: rodar, ler a diferença, isolar.
 
 ## Onde os jogos param
 
-Os dois discos de teste passam pelo BOOTSTRAP LOADER, carregam o executável,
-executam código próprio e inicializam o driver de controle. Nenhum desenha na
-tela ainda: os dois param no streaming de XA, sem nunca chegar a usar o MDEC.
+Três discos de teste bootam e executam código próprio. O **Gran Turismo
+decodifica e exibe o vídeo de abertura** — 80% dos pixels desenhados, com os
+créditos legíveis: o caminho CD → XA → MDEC → GPU funciona ponta a ponta.
 
-O Xenogears monta o display de 24 bits do FMV de abertura e para de recolher
-setores — o drive entrega quase 7000, ele recolhe 365. O Grandstream Saga nem
-liga o display. O diagnóstico completo dos dois, com o que já foi descartado,
-está em [erros-e-ajustes.md](erros-e-ajustes.md).
+Xenogears e Grandstream Saga montam o display e param antes de desenhar, os
+dois deixando de recolher setores enquanto o drive continua entregando. O
+diagnóstico de cada um está em [erros-e-ajustes.md](erros-e-ajustes.md).
 
 ## Já corrigidos por esta comparação
 

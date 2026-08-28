@@ -5,16 +5,16 @@ que sustenta cada item e o que fazer a seguir. Complementa
 [pendencias-hardware.md](pendencias-hardware.md), que é o placar resumido
 contra o console; aqui está o diagnóstico.
 
-Última revisão: 27/08/2026, commit `5a50682`.
+Última revisão: 27/08/2026, commit `d7b9cff`.
 
-Portões verdes: `cargo fmt` limpo, `cargo clippy -D warnings` limpo, 236 testes
+Portões verdes: `cargo fmt` limpo, `cargo clippy -D warnings` limpo, 258 testes
 passando, BIOS renderizando 99,6% dos pixels de referência, 6 de 21 testes do
 [ps1-tests](https://github.com/JaCzekanski/ps1-tests) batendo exatamente com o
 hardware real.
 
-**Onde os jogos chegam hoje:** os dois discos de teste passam pelo BOOTSTRAP
-LOADER, carregam o executável, executam código próprio e inicializam o driver
-de controle. Nenhum dos dois desenha na tela ainda.
+**Onde os jogos chegam hoje:** os três discos de teste bootam e executam código
+próprio. O Gran Turismo decodifica e **exibe** o vídeo de abertura; os outros
+dois montam o display e param antes de desenhar.
 
 ---
 
@@ -59,54 +59,41 @@ curl -sL -o tests.zip \
 
 ## 2. Onde os jogos param hoje
 
-### Xenogears — para no FMV de abertura
+Três discos de teste, três resultados diferentes.
 
-Boota, carrega `SLUS_006.64`, roda, monta o display de 24 bits em 320×240 a
-partir de `vram_y=240` e começa a ler o STR de abertura com `ReadS` em modo
-`0xC8` (filtro XA + ADPCM + 2×). Aí para.
+### Gran Turismo — toca o FMV de abertura
 
-O sintoma medido, em 4000 frames:
+Boota, carrega `SCUS_941.94`, monta o display de 24 bits e **decodifica e
+exibe o vídeo de abertura**: 80% dos pixels desenhados, VRAM 73% preenchida,
+créditos da Polyphony Digital legíveis na tela. Recolhe 6779 de 6779 setores
+entregues — não desperdiça um.
 
-```
-setores=6933  recolhidos=365  lba≈106400  bfrd=false
-histórico=[0x0D 0x02 0x0E 0x1B  0x02 0x0E 0x1B  0x02 0x0E 0x1B ...]
-```
+É o primeiro jogo a produzir imagem. Serve de referência: o caminho
+CD → XA → MDEC → GPU funciona ponta a ponta.
 
-`recolhidos` congela em 365 antes do frame 2000 e nunca mais sobe, enquanto o
-drive continua entregando. O jogo parou de buscar os setores e fica repetindo
-`Setfilter → Setloc → Setmode → ReadS`. A CPU passa o tempo no laço de espera
-de VBlank da `VSync()`, e o contador de VBlank **está** avançando — 3278
-incrementos em 4000 frames. Ou seja: a espera não é por VBlank, é por um
-estado que o reprodutor de vídeo deveria alcançar e não alcança.
+### Xenogears — monta o FMV e para de consumir
 
-O MDEC **nunca é tocado**: zero acessos a `0x1F801820`/`0x1F801824` numa
-janela de 200 mil acessos de I/O. O jogo trava antes de decodificar o primeiro
-quadro.
+Boota, carrega `SLUS_006.64`, monta o display de 24 bits em 320×240 a partir
+de `vram_y=240` e começa a ler o STR de abertura com `ReadS` em modo `0xC8`.
+Recolhe 365 setores e para, enquanto o drive continua entregando.
 
-**Principal suspeita, ainda não confirmada:** reprodução de STR é sincronizada
-pelo áudio. Com `XA_ADPCM` ligado e a SPU produzindo silêncio, o reprodutor
-espera um relógio de áudio que nunca anda. Confirmar isso exige implementar o
-decodificador ADPCM e a entrada de áudio da SPU — não há como testar barato.
+A CPU fica no laço de espera de VBlank da `VSync()`. O contador de VBlank
+**está** avançando — verificado no watchpoint, escrito pelo callback do jogo
+em `0x8004BFA4` a cada quadro. O MDEC nunca é tocado: zero acessos a
+`0x1F801820`/`0x1F801824` numa janela de 120 mil acessos de I/O.
 
-### Grandstream Saga — para antes de ligar o display
+O jogo trata as interrupções do CD o tempo todo (1416 acknowledges na mesma
+janela) e lê as respostas, mas não pede os dados. Ou seja: o callback roda e
+recusa o setor.
 
-Boota, carrega `SLUS_005.97`, carrega um segundo overlay (`pc = 801132a4`),
-chama `ResetGraph` duas vezes e fica lendo. `display disabled=true` do começo
-ao fim, `draw_area` em `(0,0,0,0)`, zero pixels desenhados em 5000 frames.
+A região que ele lê tem um canal só (arquivo 1, canal 1), 1746 setores de
+vídeo (submodo `0x42`) e 249 de áudio — então não é filtragem de canal.
 
-```
-setores=3402  recolhidos=401  modo=0xE0  último cmd=0x1B (ReadS)
-```
+### Grandstream Saga — não liga o display
 
-Mesmo padrão do Xenogears: consome umas centenas de setores e para, com o
-drive girando. O PC fica espalhado por dezenas de endereços em `0x8011Axxx`
-(2–3% cada), o que é trabalho de verdade e não laço apertado — mas a VRAM não
-muda entre o frame 3000 e o 6000.
-
-Os dois jogos param no mesmo ponto conceitual: **streaming de XA que nunca
-progride.**
-
----
+Boota, carrega `SLUS_005.97` e um segundo overlay, chama `ResetGraph` duas
+vezes e fica lendo. `display disabled=true` do começo ao fim, zero pixels.
+Recolhe 401 setores e para, no mesmo padrão do Xenogears.
 
 ## 3. Bugs isolados contra o hardware
 
@@ -147,16 +134,22 @@ que está olhando.
 
 ## 4. Subsistemas incompletos
 
-### SPU — registradores e memória, sem som
+### SPU — toca, sem reverb
 
-O banco de registradores, a SPU RAM de 512 KB e as transferências por PIO e
-DMA funcionam. Não existe: mixagem das 24 vozes, decodificação ADPCM, ADSR,
-pitch, volume, reverb, IRQ e captura. `step()` empurra silêncio.
+As 24 vozes com SPU-ADPCM, envelope ADSR, tom com interpolação linear e
+modulação, ruído, `ENDX` e a IRQ de endereço estão implementados, além da
+entrada de áudio do CD reamostrada e misturada à saída.
 
-Passou de "o último item da lista" para **provavelmente o próximo passo
-crítico**: é a suspeita principal para o FMV dos dois jogos.
+Falta **reverb** e a janela gaussiana de quatro pontos na interpolação. O
+primeiro é um efeito, o segundo é timbre; nenhum muda o comportamento
+observável de um jogo.
 
-O teste `spu/memory-transfer` falha no caminho de transferência.
+No `spu/memory-transfer` passam `testDtcRegister`, `testManualWriteToSpuRam`,
+`testDMAReadFromSpuRam` e `testDMAWriteToSpuRam`. Restam os casos de timing,
+que dependem do DMA deixar de ser atômico, e dois de SyncMode 0 que **não
+existem no log capturado do console** — o binário do release é mais novo que a
+captura. Sem referência, não dá para persegui-los; um teste unitário confirma
+que o caminho funciona nos dois sentidos.
 
 ### MDEC — decodifica certo, arredonda diferente
 
@@ -164,7 +157,8 @@ O decodificador e o DMA de saída funcionam. Comparado ao console em 8 bpp, a
 maioria dos bytes bate exatamente e alguns divergem em 1 ou 2 unidades — é
 arredondamento dentro do IDCT, não erro estrutural. Não é bloqueante.
 
-Nenhum dos dois jogos chega a usá-lo ainda.
+O Gran Turismo o exercita de ponta a ponta no vídeo de abertura; os outros dois
+não chegam a tocá-lo.
 
 ---
 
@@ -248,14 +242,13 @@ canal, a segunda confere.
 
 ## 8. Ordem sugerida de ataque
 
-1. **SPU: ADPCM, vozes e entrada de áudio do CD.** Deixou de ser o item grande
-   do fim da fila e virou a suspeita principal para o FMV dos dois jogos.
-   Comece pelo `spu/memory-transfer`, que dá um alvo verificável.
+1. **Por que Xenogears e Grandstream param de recolher setores.** O Gran
+   Turismo faz o mesmo caminho e funciona, então há uma referência viva para
+   comparar: rode os dois lado a lado e veja onde o callback de CD diverge.
 2. **`cpu/io-access-bitwidth`** — um `load_io_wide` fecha a classe inteira.
 3. **`cpu/code-in-io`** — pequeno, mas leia o `psx.log` antes de decidir a regra.
 4. **`cdrom/getloc`** — precisa do estado `Seeking` e do mutex de status.
-
----
+5. **Reverb da SPU**, quando o resto estiver soando.
 
 ## Apêndice — classes de erro já corrigidas
 
