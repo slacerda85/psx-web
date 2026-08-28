@@ -149,6 +149,12 @@ pub struct CdRom {
     next_sector_in: i64,
     /// A entrega do setor corrente já falhou uma vez por INT pendente.
     delivery_retry: bool,
+    /// O prazo do setor venceu e ele ainda não foi entregue.
+    ///
+    /// Separado do contador de ciclos porque a cadência do drive é mecânica:
+    /// o próximo prazo é agendado quando o anterior vence, e não quando o
+    /// software finalmente reconhece a interrupção.
+    sector_due: bool,
 
     /// Setor entregue ao CPU ou ao DMA.
     sector_buffer: Vec<u8>,
@@ -241,6 +247,7 @@ impl CdRom {
             drive: Drive::Idle,
             next_sector_in: 0,
             delivery_retry: false,
+            sector_due: false,
             sector_buffer: Vec::new(),
             sector_cursor: 0,
             data_requested: false,
@@ -451,29 +458,35 @@ impl CdRom {
         if self.drive != Drive::Reading {
             return;
         }
+
+        // A cadência é do motor, não do software.
+        //
+        // O prazo do próximo setor é reagendado assim que vence, aconteça o
+        // que acontecer com a entrega. Zerar o contador enquanto a INT1
+        // anterior não fosse reconhecida — como fazíamos — fazia o setor
+        // seguinte disparar no mesmo instante do acknowledge, fechando a
+        // janela que o PSX-SPX descreve em "CDROM Incoming Data": *"there
+        // seems to be a small delay between the acknowledge and the next
+        // interrupt, and Data Requests during that period are still treated to
+        // belong to the old interrupt"*. Sem essa janela o jogo nunca alcança
+        // o próprio pedido de dados, e o fluxo trava com o drive girando.
         self.next_sector_in -= cycles as i64;
-        if self.next_sector_in > 0 {
+        if self.next_sector_in <= 0 {
+            self.next_sector_in += self.cycles_per_sector();
+            self.sector_due = true;
+        }
+        if !self.sector_due {
             return;
         }
-        // Segura o setor só enquanto a INT1 anterior não foi reconhecida.
-        //
-        // Depois do acknowledge o drive segue em frente: se o CPU não buscou
-        // os bytes a tempo, o setor se perde, que é o que o hardware faz. O
-        // jogo tem um período de setor para recolhê-lo, e é para esse prazo
-        // que ele foi escrito.
-        //
-        // O que **não** pode entrar aqui é a fila de respostas de comando: ela
-        // é agendamento nosso, e a leitura do drive não depende dela no
-        // hardware. Um jogo que martela `GetStat` mantém sempre uma resposta
-        // em voo, e com ela no gate a entrega de setores parava de vez — foi
-        // assim que o Gran Turismo ficava preso no fluxo de abertura.
+
+        // Com a INT1 anterior ainda acesa o setor espera no buffer, e a
+        // tentativa gasta conta para a filtragem por arquivo e canal.
         if self.interrupt_flags != 0 {
             self.delivery_retry = true;
-            self.next_sector_in = 0;
             return;
         }
+        self.sector_due = false;
         let retry = std::mem::replace(&mut self.delivery_retry, false);
-        self.next_sector_in += self.cycles_per_sector();
 
         let whole = self.mode & mode::WHOLE_SECTOR != 0;
         let lba = self.read_lba;
@@ -627,6 +640,15 @@ impl CdRom {
                 1 => {
                     // Acknowledge: escrever 1 nos bits limpa as flags.
                     self.interrupt_flags &= !(value & 0x1F);
+                    if value & 0x1F != 0 {
+                        // PSX-SPX, HCLRCTL: *"After acknowledge, the result
+                        // FIFO is drained"*. Sem isso, os bytes que o software
+                        // não leu de uma resposta longa ficam para trás e
+                        // mantêm o `RSLRRDY` do status aceso para sempre — o
+                        // jogo passa a ver "ainda há resposta" a cada volta do
+                        // laço e nunca chega a pedir os dados do setor.
+                        self.response.clear();
+                    }
                     if value & 0x40 != 0 {
                         self.parameters.clear();
                     }
