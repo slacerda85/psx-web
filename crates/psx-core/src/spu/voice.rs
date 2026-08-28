@@ -51,7 +51,11 @@ impl Ramp {
                 counter >>= 1;
             }
         } else if self.exponential && self.decreasing {
-            step = (step * i32::from(level)) / 0x8000;
+            // Deslocamento aritmético, e não divisão: para passo negativo a
+            // divisão trunca **para zero** (-800 / 32768 == 0) e o nível para
+            // de descer, deixando a voz presa soando baixo para sempre. O
+            // deslocamento arredonda para baixo e sempre anda (-800 >> 15 == -1).
+            step = (step * i32::from(level)) >> 15;
         }
 
         // Passo e shift todos em um nunca avançam o contador — é assim que o
@@ -223,8 +227,10 @@ impl Voice {
         };
         let (increment, step) = ramp.advance(self.adsr_volume);
 
-        self.adsr_counter = self.adsr_counter.wrapping_add(increment);
-        if self.adsr_counter & 0x8000 == 0 {
+        // Compara com o limiar em vez de testar o bit 15: um acúmulo que passe
+        // de 0x10000 volta a ter o bit em zero, e o passo seria pulado.
+        self.adsr_counter += increment;
+        if self.adsr_counter < 0x8000 {
             return;
         }
         self.adsr_counter = 0;
@@ -278,10 +284,10 @@ impl Voice {
     /// `modulation` é a amostra da voz anterior quando o `PMON` está ligado
     /// para esta — o tom passa a variar com a amplitude da vizinha.
     pub fn sample(&mut self, ram: &[u16], modulation: Option<i16>) -> i16 {
-        if !self.is_on() {
-            self.last_sample = 0;
-            return 0;
-        }
+        // A voz não tem chave de liga-desliga: ela roda sempre, e o envelope é
+        // quem a silencia. Parar o decodificador junto congelaria o endereço
+        // corrente, e com ele a IRQ de endereço da SPU — que é como um jogo
+        // descobre que um bloco de sample foi consumido.
         if self.needs_block {
             self.fetch_block(ram);
         }

@@ -320,25 +320,29 @@ impl CdRom {
         self.advance_read(cycles);
 
         // Só entrega a próxima resposta quando a anterior foi reconhecida.
-        if self.interrupt_flags != 0 {
-            return;
-        }
-        let Some(front) = self.pending.front_mut() else {
-            return;
-        };
-        front.delay -= cycles as i64;
-        if front.delay > 0 {
-            return;
+        if self.interrupt_flags == 0 {
+            if let Some(front) = self.pending.front_mut() {
+                front.delay -= cycles as i64;
+                if front.delay <= 0 {
+                    let ready = self.pending.pop_front().expect("front existe");
+                    self.response.clear();
+                    self.response.extend(ready.bytes);
+                    self.interrupt_flags = ready.interrupt as u8;
+                }
+            }
         }
 
-        let ready = self.pending.pop_front().expect("front existe");
-        self.response.clear();
-        self.response.extend(ready.bytes);
-        self.interrupt_flags = ready.interrupt as u8;
-
-        if self.interrupt_enable & self.interrupt_flags != 0 {
-            irq.raise(Interrupt::CdRom);
-        }
+        // A linha é publicada a cada passo, e não pulsada no instante da
+        // entrega. O controlador de IRQ é quem enxerga a borda.
+        //
+        // A diferença aparece quando o software **habilita** uma fonte cuja
+        // flag já estava acesa: com o pulso, aquela interrupção se perdia para
+        // sempre, e como o controlador não entrega a resposta seguinte
+        // enquanto a flag não for reconhecida, o CD-ROM parava de vez.
+        irq.set_level(
+            Interrupt::CdRom,
+            self.interrupt_enable & self.interrupt_flags != 0,
+        );
     }
 
     /// O que o drive faz com o setor em `lba`.

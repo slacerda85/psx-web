@@ -58,6 +58,8 @@ pub struct Spu {
     cd_rate: u32,
     /// Posição fracionária dentro de `cd_queue`, em 1/65536 de amostra.
     cd_fraction: u32,
+    /// Onde a próxima amostra capturada vai, dentro de cada bloco de 512.
+    capture_index: u32,
 
     /// Buffer circular de saída, estéreo intercalado (L, R, L, R, ...).
     ring: Box<[i16]>,
@@ -116,6 +118,7 @@ impl Spu {
             cd_queue: VecDeque::new(),
             cd_rate: 44_100,
             cd_fraction: 0,
+            capture_index: 0,
             ring: vec![0; RING_CAPACITY * 2].into_boxed_slice(),
             write_cursor: 0,
             read_cursor: 0,
@@ -172,6 +175,13 @@ impl Spu {
                 sample
             };
 
+            // As vozes 1 e 3 escrevem a própria saída de volta na SPU RAM.
+            match index {
+                1 => self.capture(0x400, sample),
+                3 => self.capture(0x600, sample),
+                _ => {}
+            }
+
             previous = sample;
             left += apply_volume(sample, self.voices[index].volume_left);
             right += apply_volume(sample, self.voices[index].volume_right);
@@ -181,21 +191,26 @@ impl Spu {
             }
         }
 
+        // O mute e o desligamento valem para as vozes, **não** para o áudio de
+        // CD: silenciar a SPU enquanto uma trilha XA toca é padrão em tela de
+        // carregamento, e zerar tudo faria o áudio sumir.
+        if control & (control::ENABLE | control::UNMUTE) != (control::ENABLE | control::UNMUTE) {
+            left = 0;
+            right = 0;
+        }
+
+        let (cd_left, cd_right) = self.next_cd_frame();
+        // A captura é escrita antes do volume: o primeiro quilobyte da SPU RAM
+        // espelha o que entra, e há jogo que lê isso para medir nível.
+        self.capture(0x000, cd_left);
+        self.capture(0x200, cd_right);
         if control & control::CD_AUDIO != 0 {
-            let (cd_left, cd_right) = self.next_cd_frame();
             left += apply_volume(cd_left, self.registers[reg::CD_VOLUME_LEFT]);
             right += apply_volume(cd_right, self.registers[reg::CD_VOLUME_RIGHT]);
-        } else {
-            // Mesmo mudo o decodificador continua consumindo o fluxo: o CD não
-            // para de girar porque o mixer está desligado.
-            self.next_cd_frame();
         }
 
+        self.capture_index = (self.capture_index + 1) & 0x1FF;
         self.check_irq_address();
-
-        if control & (control::ENABLE | control::UNMUTE) != (control::ENABLE | control::UNMUTE) {
-            return (0, 0);
-        }
 
         let main_left = self.registers[reg::MAIN_VOLUME_LEFT];
         let main_right = self.registers[reg::MAIN_VOLUME_LEFT + 1];
@@ -203,6 +218,15 @@ impl Spu {
             saturate(apply_volume(saturate(left), main_left)),
             saturate(apply_volume(saturate(right), main_right)),
         )
+    }
+
+    /// Escreve uma amostra num dos quatro buffers de captura da SPU RAM.
+    ///
+    /// São 512 halfwords cada, em 0x000 (CD esquerdo), 0x200 (CD direito),
+    /// 0x400 (voz 1) e 0x600 (voz 3), preenchidos em círculo.
+    fn capture(&mut self, base: u32, sample: i16) {
+        let index = ((base + self.capture_index) as usize) % self.ram.len();
+        self.ram[index] = sample as u16;
     }
 
     /// Um passo do gerador de ruído.

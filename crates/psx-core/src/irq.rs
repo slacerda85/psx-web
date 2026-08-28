@@ -34,17 +34,54 @@ pub enum Interrupt {
 pub struct IrqController {
     stat: u16,
     mask: u16,
+    /// Nível corrente de cada linha física.
+    ///
+    /// `I_STAT` guarda a **borda de subida**, não o nível: um periférico que
+    /// mantém a linha alta não gera flag nova. Guardar o nível aqui é o que
+    /// permite ao periférico apenas publicar o seu estado, sem ter que
+    /// descobrir sozinho quando houve transição.
+    level: u16,
 }
 
 impl IrqController {
     pub const fn new() -> Self {
-        Self { stat: 0, mask: 0 }
+        Self {
+            stat: 0,
+            mask: 0,
+            level: 0,
+        }
     }
 
     /// Sinaliza uma interrupção (seta o bit em `I_STAT`).
+    ///
+    /// Para uma fonte de pulso, como o VBlank. Uma fonte que mantém uma linha
+    /// enquanto tem trabalho pendente deve usar [`Self::set_level`].
     #[inline]
     pub fn raise(&mut self, irq: Interrupt) {
         self.stat |= 1 << (irq as u16);
+    }
+
+    /// Publica o nível da linha de uma fonte.
+    ///
+    /// A flag em `I_STAT` só sobe na transição de baixo para alto. Uma fonte
+    /// que já está alta e continua alta não gera flag nova — mas uma que
+    /// abaixa e volta a subir gera.
+    ///
+    /// É o que permite a um periférico levantar a interrupção quando o
+    /// software **habilita** uma fonte cuja condição já era verdadeira. Com o
+    /// pulso no instante do evento, essa interrupção se perdia: o CD-ROM
+    /// ficava com a flag acesa, sem IRQ, e parava de entregar respostas.
+    #[inline]
+    pub fn set_level(&mut self, irq: Interrupt, high: bool) {
+        let bit = 1 << (irq as u16);
+        if high {
+            if self.level & bit == 0 {
+                self.level |= bit;
+                self.stat |= bit;
+            }
+        } else {
+            self.level &= !bit;
+        }
     }
 
     /// `true` enquanto houver interrupção pendente **e** habilitada.
