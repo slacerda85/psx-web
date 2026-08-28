@@ -837,3 +837,47 @@ struct IoTrace {
     capacity: usize,
     pc: u32,
 }
+
+#[cfg(test)]
+mod spu_dma_tests {
+    use super::*;
+
+    /// Canal 4 (SPU) em modo manual: o `spu/memory-transfer` do ps1-tests
+    /// exercita exatamente isto, e uma transferência que não conclui deixa o
+    /// software esperando para sempre pelo bit de ocupado.
+    #[test]
+    fn spu_dma_in_manual_mode_completes_in_both_directions() {
+        let mut bus = Bus::new(Bios::stub());
+        // DPCR: habilita o canal 4.
+        bus.store32(0x1F80_10F0, 1 << 19);
+
+        // Enche a RAM com um padrão e o manda para a SPU.
+        for word in 0..4u32 {
+            bus.store32(0x1000 + word * 4, 0xAABB_0000 | word);
+        }
+        bus.store32(0x1F80_1DA6, 0x0000_0100); // endereço de transferência
+        bus.store32(0x1F80_10C0, 0x0000_1000); // MADR
+        bus.store32(0x1F80_10C4, 4); // BCR: 4 palavras
+        bus.store32(0x1F80_10C8, 0x0100_0001 | (1 << 28)); // RAM→SPU, manual
+
+        let chcr = bus.load32(0x1F80_10C8);
+        assert_eq!(chcr & (1 << 24), 0, "o canal precisa concluir");
+        assert_eq!(chcr & (1 << 28), 0, "o gatilho precisa baixar");
+
+        // E de volta para outro trecho da RAM.
+        bus.store32(0x1F80_1DA6, 0x0000_0100);
+        bus.store32(0x1F80_10C0, 0x0000_2000);
+        bus.store32(0x1F80_10C4, 4);
+        bus.store32(0x1F80_10C8, 0x0100_0000 | (1 << 28)); // SPU→RAM, manual
+
+        let chcr = bus.load32(0x1F80_10C8);
+        assert_eq!(chcr & (1 << 24), 0, "a leitura também precisa concluir");
+        for word in 0..4u32 {
+            assert_eq!(
+                bus.load32(0x2000 + word * 4),
+                0xAABB_0000 | word,
+                "palavra {word} voltou da SPU RAM"
+            );
+        }
+    }
+}

@@ -150,6 +150,12 @@ pub struct Gpu {
     display_disabled: bool,
     /// Campo atual no modo entrelaçado.
     odd_field: bool,
+    /// Linha que o vídeo está varrendo, e se estamos no retraço vertical.
+    ///
+    /// O bit 31 do `GPUSTAT` sai daqui. Em 240 linhas ele acompanha a paridade
+    /// da linha corrente; em 480i acompanha o campo; no vblank é sempre zero.
+    scanline: u32,
+    in_vblank: bool,
 
     // -------------------------------------------------------------- status
     dma_direction: DmaDirection,
@@ -202,6 +208,8 @@ impl Gpu {
             interlaced: false,
             display_disabled: true,
             odd_field: false,
+            scanline: 0,
+            in_vblank: false,
             dma_direction: DmaDirection::Off,
             irq_requested: false,
             rectangle_texture_x_flip: false,
@@ -309,8 +317,13 @@ impl Gpu {
         };
         status |= data_request << 25;
 
-        // Bit 31: linha ímpar sendo desenhada. Em 480i acompanha o campo.
-        status |= (self.odd_field as u32) << 31;
+        // Bit 31: linha ímpar sendo varrida.
+        //
+        // PSX-SPX: em 480 linhas o bit muda por frame, em 240 muda **por
+        // scanline**, e no vblank é sempre zero. Alterná-lo só por frame
+        // deixava a `VSync()` da biblioteca da Sony esperando para sempre uma
+        // mudança que nunca chegava.
+        status |= (self.drawing_odd_line() as u32) << 31;
 
         status
     }
@@ -839,6 +852,24 @@ impl Gpu {
     }
 
     // ------------------------------------------------------------- vídeo
+
+    /// A linha em varredura é ímpar?
+    const fn drawing_odd_line(&self) -> bool {
+        if self.in_vblank {
+            return false;
+        }
+        if self.vertical_res_480 && self.interlaced {
+            self.odd_field
+        } else {
+            self.scanline & 1 != 0
+        }
+    }
+
+    /// Informa a linha que o vídeo está varrendo.
+    pub fn set_scanline(&mut self, line: u32, in_vblank: bool) {
+        self.scanline = line;
+        self.in_vblank = in_vblank;
+    }
 
     /// Marca o fim de um frame: alterna o campo do entrelaçamento e produz o
     /// framebuffer RGBA8 a partir da área de display atual.
