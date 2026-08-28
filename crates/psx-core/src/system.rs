@@ -114,6 +114,7 @@ impl System {
             if line == vblank_line {
                 self.bus.irq.raise(Interrupt::VBlank);
             }
+            self.bus.gpu.set_scanline(line, line >= vblank_line);
             let (cycles, instructions) = self.run_scanline(cycles_per_scanline);
             stats.cycles += cycles;
             stats.instructions += instructions;
@@ -155,7 +156,19 @@ impl System {
         // bastante para o boot e para jogos que não dependem de timing de
         // sub-scanline; refiná-lo é trabalho do scheduler ciclo-a-ciclo.
         let elapsed = spent as u32;
+        // O áudio que o drive decodificou entra no mixer antes de a SPU
+        // produzir amostras. Os dois periféricos não se conhecem; o barramento
+        // é quem os liga.
+        if let Some((frames, rate)) = self.bus.cdrom.take_audio() {
+            self.bus.spu.push_cd_audio(&frames, rate);
+        }
+        self.bus
+            .cdrom
+            .set_adpcm_busy(self.bus.spu.cd_audio_pending());
         self.bus.spu.step(elapsed);
+        if self.bus.spu.irq_pending() {
+            self.bus.irq.raise(Interrupt::Spu);
+        }
 
         (spent, instructions)
     }

@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 pub use disc::{Disc, DiscError, DiscRegion, Msf, Track, TrackKind, SECTOR_RAW, SECTOR_USER};
 
 use crate::irq::{Interrupt, IrqController};
+use crate::spu::adpcm::{self, XaCoding};
 use crate::CPU_CLOCK_HZ;
 
 /// Códigos de interrupção que o controlador entrega em `0x1F80_1803.Index1`.
@@ -120,6 +121,12 @@ pub struct CdRom {
 
     disc: Option<Disc>,
 
+    /// Áudio XA decodificado à espera da SPU, e a taxa do fluxo.
+    adpcm_output: Vec<(i16, i16)>,
+    adpcm_rate: u32,
+    adpcm_history: [adpcm::History; 2],
+    /// O decodificador de áudio ainda tem material para tocar (`ADPBUSY`).
+    adpcm_busy: bool,
     /// Arquivo e canal selecionados por `Setfilter`, para os setores XA.
     filter_file: u8,
     filter_channel: u8,
@@ -213,6 +220,10 @@ impl CdRom {
             status: status::SHELL_OPEN,
             mode: 0,
             disc: None,
+            adpcm_output: Vec::new(),
+            adpcm_rate: 37_800,
+            adpcm_history: [adpcm::History::new_const(); 2],
+            adpcm_busy: false,
             filter_file: 0,
             filter_channel: 0,
             seek_target: Msf::default(),
@@ -367,6 +378,52 @@ impl CdRom {
         Delivery::Data
     }
 
+    /// Decodifica um setor de áudio XA e o põe na fila para a SPU.
+    ///
+    /// O drive faz isso sozinho: o som sai pelo mixer sem passar pela CPU e
+    /// sem ocupar uma voz. Um jogo que sincroniza vídeo pelo áudio depende
+    /// disso para avançar.
+    fn decode_adpcm(&mut self, lba: u32) {
+        let Some(disc) = self.disc.as_ref() else {
+            return;
+        };
+        let Some([_, _, _, coding]) = disc.subheader(lba) else {
+            return;
+        };
+        let Some(sector) = disc.read_whole_sector(lba) else {
+            return;
+        };
+        // Em "setor inteiro" os bytes começam no header: 4 de header e 8 de
+        // subheader antes da carga.
+        let payload = &sector[12..];
+        let coding = XaCoding::from_byte(coding);
+        self.adpcm_rate = coding.sample_rate;
+        adpcm::decode_xa_sector(
+            payload,
+            coding,
+            &mut self.adpcm_history,
+            &mut self.adpcm_output,
+        );
+    }
+
+    /// Informa se o decodificador ainda tem áudio para tocar.
+    ///
+    /// Vira o bit `ADPBUSY` de `0x1F80_1800`, que é como o software pergunta
+    /// se o XA ainda está rodando.
+    pub fn set_adpcm_busy(&mut self, busy: bool) {
+        self.adpcm_busy = busy;
+    }
+
+    /// Retira o áudio de CD decodificado desde a última chamada.
+    ///
+    /// O barramento o entrega à SPU; o CD-ROM não a conhece.
+    pub fn take_audio(&mut self) -> Option<(Vec<(i16, i16)>, u32)> {
+        if self.adpcm_output.is_empty() {
+            return None;
+        }
+        Some((std::mem::take(&mut self.adpcm_output), self.adpcm_rate))
+    }
+
     /// Produz o próximo setor quando o drive está lendo.
     fn advance_read(&mut self, cycles: u32) {
         if self.drive != Drive::Reading {
@@ -376,17 +433,19 @@ impl CdRom {
         if self.next_sector_in > 0 {
             return;
         }
-        // Segura o setor enquanto o anterior não foi entregue **e** recolhido.
+        // Segura o setor só enquanto a INT1 anterior não foi reconhecida.
         //
-        // Não basta olhar a fila de respostas: assim que uma INT1 é entregue
-        // ela sai da fila e vira `interrupt_flags`, e produzir o próximo setor
-        // nesse intervalo sobrescreveria o que o CPU ainda vai ler. O jogo
-        // perde um setor no meio de um arquivo, o checksum falha e ele relê o
-        // mesmo trecho para sempre — que é exatamente como o Xenogears travava.
+        // Depois do acknowledge o drive segue em frente: se o CPU não buscou
+        // os bytes a tempo, o setor se perde, que é o que o hardware faz. O
+        // jogo tem um período de setor para recolhê-lo, e é para esse prazo
+        // que ele foi escrito.
         //
-        // É também a primeira das duas tentativas de entrega do hardware: ao
-        // esbarrar aqui, a próxima passa a conferir arquivo e canal.
-        if !self.pending.is_empty() || self.interrupt_flags != 0 {
+        // O que **não** pode entrar aqui é a fila de respostas de comando: ela
+        // é agendamento nosso, e a leitura do drive não depende dela no
+        // hardware. Um jogo que martela `GetStat` mantém sempre uma resposta
+        // em voo, e com ela no gate a entrega de setores parava de vez — foi
+        // assim que o Gran Turismo ficava preso no fluxo de abertura.
+        if self.interrupt_flags != 0 {
             self.delivery_retry = true;
             self.next_sector_in = 0;
             return;
@@ -401,10 +460,19 @@ impl CdRom {
         // decodificador ADPCM, que toca o som sem passar pela CPU. Entregá-lo
         // como se fosse dado enche o jogo de INT1 que ele não pediu — o
         // Grandstream Saga recebe mais setores de áudio do que de dados.
-        if self.classify(lba, retry) != Delivery::Data {
-            self.position = Msf::from_lba(lba);
-            self.read_lba = lba.wrapping_add(1);
-            return;
+        match self.classify(lba, retry) {
+            Delivery::Adpcm => {
+                self.decode_adpcm(lba);
+                self.position = Msf::from_lba(lba);
+                self.read_lba = lba.wrapping_add(1);
+                return;
+            }
+            Delivery::Discard => {
+                self.position = Msf::from_lba(lba);
+                self.read_lba = lba.wrapping_add(1);
+                return;
+            }
+            Delivery::Data => {}
         }
         let sector = self.disc.as_ref().and_then(|disc| {
             if whole {
@@ -483,6 +551,10 @@ impl CdRom {
     /// `0x1F80_1800` — índice e bits de prontidão.
     fn status_register(&self) -> u8 {
         let mut value = self.index;
+        // Bit 2: o decodificador de áudio XA está tocando.
+        if self.adpcm_busy {
+            value |= 1 << 2;
+        }
         // Bit 3: FIFO de parâmetros vazia (ativo em 1).
         if self.parameters.is_empty() {
             value |= 1 << 3;
