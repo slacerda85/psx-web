@@ -48,7 +48,9 @@ pub struct Spu {
     endx: u32,
     /// Registrador de deslocamento do gerador de ruído.
     noise: u32,
-    noise_counter: u32,
+    /// Contador do gerador de ruído, com sinal: o algoritmo do console anda
+    /// para baixo e recarrega ao cruzar zero.
+    noise_timer: i32,
     /// A IRQ de endereço já disparou e ainda não foi reconhecida.
     irq_flag: bool,
 
@@ -113,7 +115,7 @@ impl Spu {
             transfer_address: 0,
             endx: 0,
             noise: 1,
-            noise_counter: 0,
+            noise_timer: 0,
             irq_flag: false,
             cd_queue: VecDeque::new(),
             cd_rate: 44_100,
@@ -168,6 +170,13 @@ impl Spu {
                 let ram = &self.ram;
                 self.voices[index].sample(ram, modulated)
             };
+            // A voz leu oito halfwords ao buscar um bloco; qualquer uma delas
+            // pode ser o endereço vigiado.
+            if let Some(base) = self.voices[index].take_fetch() {
+                for offset in 0..8 {
+                    self.check_ram_access(base + offset);
+                }
+            }
             let sample = if noise_enable & (1 << index) != 0 {
                 let level = i32::from(self.voices[index].adsr_volume);
                 (((self.noise as i16 as i32) * level) >> 15) as i16
@@ -210,7 +219,6 @@ impl Spu {
         }
 
         self.capture_index = (self.capture_index + 1) & 0x1FF;
-        self.check_irq_address();
 
         let main_left = self.registers[reg::MAIN_VOLUME_LEFT];
         let main_right = self.registers[reg::MAIN_VOLUME_LEFT + 1];
@@ -220,33 +228,90 @@ impl Spu {
         )
     }
 
+    /// Lê uma halfword da SPU RAM, olhando a IRQ de endereço no caminho.
+    fn ram_read(&mut self, index: u32) -> u16 {
+        self.check_ram_access(index);
+        self.ram[(index as usize) % self.ram.len()]
+    }
+
+    /// Escreve uma halfword na SPU RAM, olhando a IRQ de endereço no caminho.
+    fn ram_write(&mut self, index: u32, value: u16) {
+        self.check_ram_access(index);
+        let slot = (index as usize) % self.ram.len();
+        self.ram[slot] = value;
+    }
+
+    /// A IRQ de endereço dispara em **qualquer** acesso à SPU RAM.
+    ///
+    /// PSX-SPX, "SPU Interrupt": *"all voices are permanently reading data from
+    /// SPU RAM — even in Noise mode, even if the Voice Volume is zero, and even
+    /// if the ADSR pattern has finished the Release period — so even inaudible
+    /// voices can trigger IRQs"*. E a faixa 0x000..0x1FF pega as escritas dos
+    /// quatro buffers de captura.
+    ///
+    /// Por isso a checagem mora aqui, no único ponto por onde todo acesso passa,
+    /// em vez de num laço sobre as vozes: assim a captura e o DMA entram de
+    /// graça, e nenhuma voz precisa estar audível.
+    fn check_ram_access(&mut self, index: u32) {
+        let control = self.registers[reg::CONTROL];
+        // A IRQ9 só vale com a SPU ligada — SPUCNT bit 6, *"only when Bit15=1"*.
+        const ARMED: u16 = control::IRQ_ENABLE | control::ENABLE;
+        if control & ARMED != ARMED {
+            return;
+        }
+        // O registrador guarda o endereço dividido por oito, em bytes; a RAM é
+        // indexada em halfwords, daí o fator quatro.
+        if index == u32::from(self.registers[reg::IRQ_ADDRESS]) * 4 {
+            self.irq_flag = true;
+        }
+    }
+
     /// Escreve uma amostra num dos quatro buffers de captura da SPU RAM.
     ///
     /// São 512 halfwords cada, em 0x000 (CD esquerdo), 0x200 (CD direito),
     /// 0x400 (voz 1) e 0x600 (voz 3), preenchidos em círculo.
     fn capture(&mut self, base: u32, sample: i16) {
-        let index = ((base + self.capture_index) as usize) % self.ram.len();
-        self.ram[index] = sample as u16;
+        self.ram_write(base + self.capture_index, sample as u16);
     }
 
-    /// Um passo do gerador de ruído.
+    /// Um passo do gerador de ruído, a 44,1 kHz.
     ///
-    /// O período vem dos bits 8..13 do `SPUCNT` e é compartilhado por todas as
-    /// vozes em modo ruído.
+    /// PSX-SPX, "SPU Noise Generator", transcrito sem interpretação:
+    ///
+    /// ```text
+    ///   Timer = Timer - NoiseStep                ; passo 4..7
+    ///   ParityBit = Level.15 xor .12 xor .11 xor .10 xor 1
+    ///   IF Timer<0 then Level = Level*2 + ParityBit
+    ///   IF Timer<0 then Timer = Timer + (20000h SHR NoiseShift)
+    ///   IF Timer<0 then Timer = Timer + (20000h SHR NoiseShift)
+    /// ```
+    ///
+    /// O contador é recarregado **duas vezes** de propósito: com deslocamento
+    /// grande o período fica menor que o passo, e uma recarga só deixaria o
+    /// contador negativo para sempre.
+    ///
+    /// A frequência sai apenas daqui — a taxa de amostragem da voz não afeta o
+    /// ruído, e por isso todas as vozes em modo ruído soam na mesma frequência.
     fn step_noise(&mut self) {
         let control = self.registers[reg::CONTROL];
         let shift = (control >> 10) & 0x0F;
-        let step = (control >> 8) & 0x03;
-        let period = (0x8000u32 >> shift).max(1) * (4 + u32::from(step));
+        let step = 4 + i32::from((control >> 8) & 0x03);
 
-        self.noise_counter += 1;
-        if self.noise_counter < period.max(1) {
-            return;
+        self.noise_timer -= step;
+
+        // A paridade tem o `xor 1` do final: sem ele a sequência degenera para
+        // zero, porque o estado todo-zeros seria um ponto fixo.
+        let level = self.noise;
+        let parity = ((level >> 15) ^ (level >> 12) ^ (level >> 11) ^ (level >> 10) ^ 1) & 1;
+
+        if self.noise_timer < 0 {
+            self.noise = ((level << 1) | parity) & 0xFFFF;
+            let reload = 0x2_0000 >> shift;
+            self.noise_timer += reload;
+            if self.noise_timer < 0 {
+                self.noise_timer += reload;
+            }
         }
-        self.noise_counter = 0;
-        let bit =
-            ((self.noise >> 15) ^ (self.noise >> 12) ^ (self.noise >> 11) ^ (self.noise >> 10)) & 1;
-        self.noise = ((self.noise << 1) | bit) & 0xFFFF;
     }
 
     /// O próximo quadro de áudio do CD, reamostrado para 44100 Hz.
@@ -285,21 +350,6 @@ impl Spu {
     /// É o que o `ADPBUSY` do CD-ROM reporta: o decodificador está ocupado.
     pub fn cd_audio_pending(&self) -> bool {
         !self.cd_queue.is_empty()
-    }
-
-    /// Dispara a IRQ da SPU quando alguma voz passa pelo endereço vigiado.
-    fn check_irq_address(&mut self) {
-        if self.registers[reg::CONTROL] & control::IRQ_ENABLE == 0 {
-            self.irq_flag = false;
-            return;
-        }
-        let watched = u32::from(self.registers[reg::IRQ_ADDRESS]) * 4;
-        for voice in &self.voices {
-            if voice.is_on() && voice.current_block() == watched & !7 {
-                self.irq_flag = true;
-                return;
-            }
-        }
     }
 
     /// A SPU está pedindo interrupção?
@@ -348,7 +398,7 @@ impl Spu {
             reg::ENDX => self.endx as u16,
             index if index == reg::ENDX + 1 => (self.endx >> 16) as u16,
             reg::TRANSFER_FIFO => {
-                let value = self.ram[(self.transfer_address as usize) % self.ram.len()];
+                let value = self.ram_read(self.transfer_address);
                 self.transfer_address = self.transfer_address.wrapping_add(1);
                 value
             }
@@ -436,8 +486,7 @@ impl Spu {
     }
 
     fn write_ram(&mut self, value: u16) {
-        let address = (self.transfer_address as usize) % self.ram.len();
-        self.ram[address] = value;
+        self.ram_write(self.transfer_address, value);
         self.transfer_address = self.transfer_address.wrapping_add(1);
     }
 
@@ -463,9 +512,9 @@ impl Spu {
 
     /// Transferência de DMA (canal 4), SPU → RAM.
     pub fn dma_read(&mut self) -> u32 {
-        let low = self.ram[(self.transfer_address as usize) % self.ram.len()] as u32;
+        let low = self.ram_read(self.transfer_address) as u32;
         self.transfer_address = self.transfer_address.wrapping_add(1);
-        let high = self.ram[(self.transfer_address as usize) % self.ram.len()] as u32;
+        let high = self.ram_read(self.transfer_address) as u32;
         self.transfer_address = self.transfer_address.wrapping_add(1);
         low | (high << 16)
     }
@@ -676,6 +725,116 @@ mod tests {
             assert!(
                 consumed.abs_diff(expected) <= 2,
                 "fonte de {rate} Hz: consumiu {consumed}, esperado {expected}"
+            );
+        }
+    }
+
+    /// Liga a SPU com a IRQ de endereço armada no bloco indicado.
+    fn armed_at(block: u16) -> Spu {
+        let mut spu = unmuted();
+        // O registrador guarda o endereço dividido por oito; um bloco ADPCM
+        // tem dezesseis bytes, então blocos consecutivos andam de dois em dois.
+        spu.write(0x1A4, block * 2);
+        spu.write(
+            0x1AA,
+            control::ENABLE | control::UNMUTE | control::IRQ_ENABLE,
+        );
+        spu
+    }
+
+    /// PSX-SPX, "SPU Interrupt": a IRQ dispara quando **uma voz lê** o endereço
+    /// vigiado, e vozes inaudíveis leem do mesmo jeito — volume zero, modo
+    /// ruído ou envelope terminado não impedem nada.
+    #[test]
+    fn a_voice_reading_the_watched_block_raises_the_irq() {
+        let mut spu = armed_at(2);
+        // Um bloco de silêncio que se repete, começando no bloco vigiado.
+        spu.ram[16] = 0x000C;
+        spu.write(0x06, 2 * 2); // endereço inicial da voz 0, em unidades de 8 B
+        spu.write(0x04, 0x1000); // tom normal
+        spu.write(0x08, 0x000F); // ataque rápido
+        spu.write(0x188, 0x0001); // key on
+
+        assert!(!spu.irq_pending());
+        spu.step(CYCLES_PER_SAMPLE);
+        assert!(spu.irq_pending(), "a busca do bloco vigiado levanta a IRQ");
+        assert_ne!(spu.read(0x1AE) & (1 << 6), 0, "e aparece no SPUSTAT");
+    }
+
+    /// Mesma página: a faixa 0x000..0x1FF dispara nas **escritas** dos quatro
+    /// buffers de captura, e a captura de áudio de CD é sempre ativa.
+    #[test]
+    fn the_capture_buffers_raise_the_irq_too() {
+        let mut spu = armed_at(0);
+        // Endereço vigiado dentro do buffer de captura do CD esquerdo.
+        spu.write(0x1A4, 0);
+        spu.push_cd_audio(&[(1234, -1234); 8], 44_100);
+
+        assert!(!spu.irq_pending());
+        spu.step(CYCLES_PER_SAMPLE);
+        assert!(spu.irq_pending(), "a captura escreve na RAM e dispara");
+    }
+
+    /// A transferência por software passa pelo mesmo funil.
+    #[test]
+    fn a_manual_transfer_raises_the_irq() {
+        let mut spu = armed_at(8);
+        spu.write(0x1A6, 8 * 2); // endereço de transferência no bloco vigiado
+        assert!(!spu.irq_pending());
+        spu.write(0x1A8, 0xBEEF);
+        assert!(spu.irq_pending(), "escrita manual na SPU RAM dispara");
+    }
+
+    /// Sem a SPU ligada não há IRQ9: SPUCNT bit 6 vale *"only when Bit15=1"*.
+    #[test]
+    fn the_irq_needs_the_spu_enabled() {
+        let mut spu = Spu::new();
+        spu.write(0x1A4, 8 * 2);
+        spu.write(0x1AA, control::IRQ_ENABLE); // armada, mas SPU desligada
+        spu.write(0x1A6, 8 * 2);
+        spu.write(0x1A8, 0xBEEF);
+        assert!(!spu.irq_pending());
+    }
+
+    /// O gerador de ruído do PSX-SPX é determinístico: o mesmo shift e o mesmo
+    /// step produzem sempre a mesma sequência. O vetor abaixo é o nosso, travado
+    /// como regressão — se a fórmula mudar, ele acusa.
+    #[test]
+    fn the_noise_generator_follows_the_documented_lfsr() {
+        let mut spu = unmuted();
+        // Shift 0 e step 0: a recarga é a maior possível e o nível anda devagar.
+        spu.write(0x1AA, control::ENABLE | control::UNMUTE);
+        let mut vistos = Vec::new();
+        for _ in 0..8 {
+            for _ in 0..(0x2_0000 / 4) {
+                spu.step_noise();
+            }
+            vistos.push(spu.noise);
+        }
+        // O nível dobra e recebe a paridade a cada estouro do contador, então a
+        // sequência é estritamente a do deslocamento — nunca fica parada.
+        assert!(
+            vistos.windows(2).all(|par| par[0] != par[1]),
+            "o nível precisa andar a cada recarga: {vistos:?}"
+        );
+        assert_ne!(spu.noise, 0, "o xor 1 da paridade impede o ponto fixo zero");
+    }
+
+    /// Com deslocamento grande o período fica menor que o passo, e é por isso
+    /// que o console recarrega o contador duas vezes.
+    #[test]
+    fn a_large_shift_reloads_the_timer_twice() {
+        let mut spu = unmuted();
+        // Shift 0x0F: recarga de 0x20000 >> 15 = 4, com passo 7.
+        spu.write(
+            0x1AA,
+            control::ENABLE | control::UNMUTE | (0x0F << 10) | (3 << 8),
+        );
+        for _ in 0..64 {
+            spu.step_noise();
+            assert!(
+                spu.noise_timer >= 0,
+                "uma recarga só deixaria o contador negativo para sempre"
             );
         }
     }

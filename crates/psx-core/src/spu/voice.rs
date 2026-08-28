@@ -101,6 +101,11 @@ pub struct Voice {
     pub last_sample: i16,
     /// Ainda não há bloco decodificado: o primeiro passo precisa buscar um.
     needs_block: bool,
+    /// Endereço do último bloco buscado, em halfwords.
+    ///
+    /// A SPU precisa saber disso porque a IRQ de endereço dispara em **qualquer**
+    /// leitura da SPU RAM, e a voz é quem sabe de onde leu.
+    last_fetch: Option<u32>,
 }
 
 impl Default for Voice {
@@ -129,7 +134,13 @@ impl Voice {
             reached_end: false,
             last_sample: 0,
             needs_block: true,
+            last_fetch: None,
         }
+    }
+
+    /// Consome o endereço do bloco buscado desde a última chamada.
+    pub fn take_fetch(&mut self) -> Option<u32> {
+        self.last_fetch.take()
     }
 
     pub const fn phase(&self) -> Phase {
@@ -254,6 +265,7 @@ impl Voice {
 
     /// Lê e decodifica o bloco de 16 bytes apontado por `current_address`.
     fn fetch_block(&mut self, ram: &[u16]) {
+        self.last_fetch = Some(self.current_address);
         let mut bytes = [0u8; 16];
         for (index, pair) in bytes.chunks_exact_mut(2).enumerate() {
             let word = ram[(self.current_address as usize + index) % ram.len()];
