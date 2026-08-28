@@ -1,12 +1,19 @@
-# O que o rustation-ng faz diferente
+# Onde nós divergimos do console
 
-Análise do [rustation-ng](https://github.com/simias/rustation-ng) (Rust, GPLv2)
-contra a nossa implementação, feita para achar causa dos bugs abertos e não
-para copiar código. Cada item abaixo tem o que eles fazem, o que nós fazemos,
+Duas fontes cruzadas contra a nossa implementação, para achar causa dos bugs
+abertos: o [rustation-ng](https://github.com/simias/rustation-ng) (Rust,
+GPLv2), que dá comparação de estrutura, e o
+[markdown do PSX-SPX](https://github.com/psx-spx/psx-spx.github.io/tree/master/docs),
+que dá a regra escrita. Cada item tem o que o console faz, o que nós fazemos,
 por que a diferença importa e o que mudar.
 
-Fontes lidas: `src/psx/spu.rs`, `dma.rs`, `irq.rs`, `mdec.rs`,
-`cd/cdc/decoder.rs`.
+Lidos: do rustation, `src/psx/spu.rs`, `dma.rs`, `irq.rs`, `mdec.rs` e
+`cd/cdc/decoder.rs`; do PSX-SPX, `cdromdrive.md`, `interrupts.md`,
+`dmachannels.md`, `soundprocessingunitspu.md` e `macroblockdecodermdec.md`.
+
+O markdown vale mais que o site renderizado para varredura: dá para procurar o
+texto inteiro de uma vez, e é lá que estão as seções que o índice do site
+esconde — "First Response", "Responses", "BUSYSTS flag".
 
 ---
 
@@ -286,26 +293,84 @@ sessão também não tem resposta fechada lá.
 
 ---
 
-## Ordem de ataque
+## 10. Comandos são retidos enquanto houver interrupção pendente
 
-Da maior chance de destravar jogo para a menor, e todas independentes:
+PSX-SPX, "First Response (INT3)", sobre o mainloop do drive:
 
-1. **IRQ por nível** (seção 1). É a única que explica um travamento total do
-   CD-ROM, e é a hipótese mais forte para Guilty Gear, Grandstream e Xenogears
-   pararem de recolher setores.
-2. **Vozes sempre rodando** (seção 3). Segunda hipótese para os mesmos jogos,
-   por outro caminho — a IRQ de endereço da SPU.
-3. **Decaimento exponencial e divisor do envelope** (seções 4 e 5). Duas linhas,
-   com teste, e explicam voz presa soando.
-4. **Mute do CD e captura** (seções 6 e 7). Corrigem áudio, não travamento.
-5. **`BUSYSTS` e `BFRD` durante transferência** (seção 2). Corretude de
-   registrador, sem sintoma conhecido ainda.
+> *"Main CPU has sent a command, **AND, there is no INT pending** (if an INT is
+> pending, then the command won't be executed yet, but will be executed in
+> following mainloop cycles; once when INT got acknowledged)."*
+
+Nós executávamos o comando dentro da própria escrita do registrador. O
+hardware o **retém** até o software reconhecer a interrupção anterior.
+
+Isso também dá o `BUSYSTS` da seção 2 de graça: o bit 7 do status é exatamente
+"há comando escrito e ainda não aceito".
+
+**Feito.** Um teste cobre o caso: com a interrupção acesa, o comando seguinte
+não responde; depois do acknowledge, responde.
+
+## 11. A fila de respostas não é uma fila
+
+Mesma página, seção "Responses":
+
+> *"Instead of using a real queue, it's merely using some flags (...) There is
+> no flag for First Response (INT3); because that INT is generated immediately
+> after executing a command. The flag mechanism means that the SUB-CPU cannot
+> hold more than one undelivered INT1."*
+
+Ou seja: **uma** flag de INT2, **uma** de INT1, e o INT3 sai na hora da
+execução. Nosso `pending` é um `VecDeque` sem limite.
+
+Na prática a retenção de comando da seção 10 já impede a fila de crescer
+muito, mas o modelo continua diferente do silício. Um jogo que conte com
+perder um INT1 antigo vê comportamento diferente aqui.
+
+**Ação:** trocar a fila por dois campos, `second_response` e `data_response`.
+Não é urgente e mexe em código sensível.
+
+## 12. Um comando novo pode cancelar a segunda resposta do anterior
+
+Mesma página, seção "BUSYSTS flag":
+
+> *"`Stop -> Wait for INT3 IRQ -> clear IRQ -> SetMode/Pause/...` Will **drop
+> the second response of Stop()**, and then execute the next command."*
+
+Para `Pause`, `ReadN` e `ReadS` o texto diz que nada é descartado. Ou seja: é
+por comando, não uma regra geral — e só o `Stop` está documentado.
+
+Nós nunca descartamos. Grandstream e Xenogears usam `Pause` seguido de
+`Setloc`, que segundo o texto **não** descarta; então isto provavelmente não os
+afeta.
+
+**Ação:** nenhuma. Fica registrado para não ser redescoberto como novidade.
 
 ---
 
-## Licença
+## Ordem de ataque
 
-O rustation-ng é GPLv2. Este documento descreve comportamento observado para
-guiar implementação independente; **nenhum código foi copiado**, e nenhum deve
-ser. Os trechos citados aqui são referência de leitura, no volume mínimo para
-identificar a diferença.
+Já aplicados, todos verificados contra os portões e **nenhum deles destravou os
+três jogos**: IRQ por nível (1), `BUSYSTS` e retenção de comando (2 e 10),
+vozes sempre rodando (3), decaimento exponencial e divisor do envelope (4 e 5),
+mute do CD e captura (6 e 7).
+
+O que resta, em ordem:
+
+1. **`BFRD` durante transferência em curso** (seção 2). O único item da lista
+   com efeito possível sobre o fluxo de setores: hoje um pedido repetido no
+   meio de uma leitura descarta o resto do setor corrente, e os três jogos
+   travados escrevem nesse registrador a cada INT1.
+2. **Duas flags em vez de fila de respostas** (seção 11). Aproxima o modelo do
+   silício; mexe em código sensível, então só com sintoma que a justifique.
+3. **Prontidão de DMA por dispositivo** (seção 8), que é o scheduler de ciclos
+   e segue fora do MVP.
+
+---
+
+## Licenca e procedencia
+
+O rustation-ng e GPLv2. Este documento descreve comportamento observado para
+guiar implementacao independente; **nenhum codigo foi copiado**, e nenhum deve
+ser. Os trechos citados sao referencia de leitura, no volume minimo para
+identificar a diferenca. O PSX-SPX e documentacao, e as citacoes dele estao
+marcadas como tal.

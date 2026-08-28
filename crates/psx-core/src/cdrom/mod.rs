@@ -114,6 +114,14 @@ pub struct CdRom {
     /// Interrupção pendente (`0x1F80_1803.Index1`), 0 = nenhuma.
     interrupt_flags: u8,
     pending: VecDeque<PendingResponse>,
+    /// Comando escrito pelo CPU e ainda não entregue ao controlador.
+    ///
+    /// PSX-SPX, "First Response": o mainloop do drive só executa um comando
+    /// quando **não há interrupção pendente**. Escrever o comando não o
+    /// executa; ele fica retido até o software reconhecer a interrupção
+    /// anterior. Os parâmetros vão junto, tirados da FIFO no momento da
+    /// escrita.
+    command_pending: Option<(u8, Vec<u8>)>,
     /// Status corrente reportado por `GetStat`.
     status: u8,
     /// Modo corrente, escrito por `Setmode`.
@@ -215,6 +223,7 @@ impl CdRom {
             interrupt_enable: 0,
             interrupt_flags: 0,
             pending: VecDeque::new(),
+            command_pending: None,
             // Sem disco: bandeja reportada como aberta, que é o que o BIOS
             // espera para cair no shell.
             status: status::SHELL_OPEN,
@@ -329,6 +338,15 @@ impl CdRom {
                     self.response.extend(ready.bytes);
                     self.interrupt_flags = ready.interrupt as u8;
                 }
+            }
+        }
+
+        // Com a linha limpa e nada a entregar, o comando retido finalmente
+        // vai ao controlador. A ordem importa: uma INT1 ou INT2 gerada neste
+        // mesmo passo tem precedência e adia o comando mais uma volta.
+        if self.interrupt_flags == 0 && self.pending.is_empty() {
+            if let Some((command, parameters)) = self.command_pending.take() {
+                self.execute(command, parameters);
             }
         }
 
@@ -555,6 +573,10 @@ impl CdRom {
     /// `0x1F80_1800` — índice e bits de prontidão.
     fn status_register(&self) -> u8 {
         let mut value = self.index;
+        // Bit 7: o controlador ainda não aceitou o comando escrito.
+        if self.command_pending.is_some() {
+            value |= 1 << 7;
+        }
         // Bit 2: o decodificador de áudio XA está tocando.
         if self.adpcm_busy {
             value |= 1 << 2;
@@ -587,7 +609,8 @@ impl CdRom {
             // registradores de som, não de controle.
             1 => {
                 if self.index == 0 {
-                    self.execute(value)
+                    let parameters = self.parameters.drain(..).collect();
+                    self.command_pending = Some((value, parameters));
                 }
             }
             2 => match self.index {
@@ -659,12 +682,11 @@ impl CdRom {
     }
 
     /// Executa um comando escrito em `0x1F80_1801.Index0`.
-    fn execute(&mut self, command: u8) {
+    fn execute(&mut self, command: u8, parameters: Vec<u8>) {
         if self.history.len() == 16 {
             self.history.pop_front();
         }
         self.history.push_back(command);
-        let parameters: Vec<u8> = self.parameters.drain(..).collect();
 
         match command {
             // GetStat
@@ -1072,10 +1094,12 @@ mod tests {
     #[test]
     fn test_command_returns_the_firmware_version() {
         let (mut cdrom, mut irq) = armed();
-        cdrom.write(2, 0x20); // parâmetro
-        cdrom.write(1, 0x19); // Test
+        command(&mut cdrom, 0x19, &[0x20]); // Test, subfunção 0x20
 
-        cdrom.step(ACKNOWLEDGE_DELAY as u32, &mut irq);
+        assert_eq!(
+            wait_irq(&mut cdrom, &mut irq),
+            CdInterrupt::Acknowledge as u8
+        );
         assert_eq!(cdrom.read(1), 0x94);
         assert_eq!(cdrom.read(1), 0x09);
     }
@@ -1083,14 +1107,41 @@ mod tests {
     #[test]
     fn unknown_command_is_counted_and_answered_with_an_error() {
         let (mut cdrom, mut irq) = armed();
-        cdrom.write(1, 0x7E);
+        command(&mut cdrom, 0x7E, &[]);
 
+        // O comando fica retido até o controlador aceitá-lo, então o contador
+        // só sobe depois do primeiro passo.
+        assert_eq!(wait_irq(&mut cdrom, &mut irq), CdInterrupt::Error as u8);
         assert_eq!(cdrom.unimplemented_commands(), 1);
         assert_eq!(cdrom.last_unimplemented_command(), 0x7E);
+    }
 
-        cdrom.step(ACKNOWLEDGE_DELAY as u32, &mut irq);
-        cdrom.write(0, 1);
-        assert_eq!(cdrom.read(3) & 0x1F, CdInterrupt::Error as u8);
+    #[test]
+    fn a_command_waits_for_the_pending_interrupt_to_be_acknowledged() {
+        let (mut cdrom, mut irq) = armed();
+        command(&mut cdrom, 0x01, &[]); // GetStat
+        assert_eq!(
+            wait_irq(&mut cdrom, &mut irq),
+            CdInterrupt::Acknowledge as u8
+        );
+
+        // Com a interrupção ainda acesa, o comando seguinte não é executado.
+        command(&mut cdrom, 0x19, &[0x20]);
+        for _ in 0..8 {
+            cdrom.step(ACKNOWLEDGE_DELAY as u32, &mut irq);
+        }
+        assert_eq!(
+            cdrom.read(1),
+            cdrom.status,
+            "a resposta ainda é a do GetStat"
+        );
+
+        ack(&mut cdrom);
+        assert_eq!(
+            wait_irq(&mut cdrom, &mut irq),
+            CdInterrupt::Acknowledge as u8
+        );
+        assert_eq!(cdrom.read(1), 0x94, "agora sim o Test respondeu");
     }
 
     #[test]
